@@ -124,6 +124,25 @@ def test_other_key_cannot_decrypt(monkeypatch, caplog):
     assert "解密失败" in caplog.text
 
 
+def test_key_derivation_is_aes256_over_sha256():
+    """派生密钥必须是 sha256(SENSITIVE_FIELD_KEY) 的 32 字节，钉死而不是「能加解密就行」。
+
+    起因（变异测试实跑出的存活变异）：把 `hashlib.sha256` 换成 `hashlib.md5` 后，
+    全部往返用例照样绿——AESGCM 接受 16 字节密钥，等于悄悄降级成 AES-128；
+    而下一次部署若再把派生方式换回去，库里所有密文都解不开（收款人永久丢失）。
+    强度与「派生方式不可改」都是这个模块的承诺，必须各自有断言。
+    """
+    import hashlib
+
+    secret = settings.SENSITIVE_FIELD_KEY
+    assert secret, "用例依赖 conftest 已配好的密钥"
+    key = cf._derive_key()
+    assert len(key) == 32, f"密钥 {len(key)} 字节：AESGCM 会静默按 AES-128/AES-192 运行"
+    assert key == hashlib.sha256(secret.encode("utf-8")).digest(), (
+        "派生方式与 crypto_field 模块注释/SECURITY.md 口径不一致：换派生 = 换密钥，"
+        "存量密文全部不可解，必须走密钥轮换流程而不是改这一行")
+
+
 def test_missing_key_writes_plaintext_but_warns_once(monkeypatch, caplog):
     """未配密钥：降级写明文（不把提现整体打死）+ 一次性 CRITICAL 告警。
 
@@ -190,6 +209,10 @@ def test_worst_case_ciphertext_fits_the_column(model, column, schema_model, sche
     字段没有字符集限制，所以最坏情形按汉字算（UTF-8 每字 3 字节）。列宽不够时
     MySQL 严格模式报 1406 让整个提现事务失败，非严格模式静默截断——截断的密文
     永远解不开，这笔钱既打不出去也追不回收款人。
+
+    断言口径是「列宽 ≥ 当前接口允许的最坏密文长」，不是「列宽必须等于 512」：
+    把 real_name 改成 255 在本用例下不报错（最坏 247，仍够用），这是刻意的——
+    真正会响的是接口 `max_length` 被放宽而列宽没跟上。
     """
     n = _max_len(schema_model, schema_field)
     width = model.__table__.c[column].type.length
