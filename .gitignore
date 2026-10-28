@@ -1,0 +1,39 @@
+# 密钥与证书
+.env
+.env.*
+**/.env
+**/.env.*
+!.env.example
+certs/
+nginx/certs/
+*.pem
+*.key
+*.cnf
+# 备份与快照
+backups/
+backup/
+backup-*/
+*_backup/
+_reskin_bak/
+rollback/
+*.bak
+*.bak.*
+*.bak-*
+*.tar.gz
+*.tgz
+*.zip
+# 运行产物
+__pycache__/
+*.pyc
+*.log
+venv/
+.venv/
+node_modules/
+data-staging/
+*.db
+*.db-wal
+*.sqlite
+.DS_Store
+
+# 带时间戳的散备份文件
+*.bak*

@@ -1,0 +1,36 @@
+# Runtime dependencies. All versions are pinned with == to keep local,
+# CI and container images identical.
+# Notes and pitfalls for specific packages: see docs/dependency-notes.md
+# (Chinese comments were moved out because they broke pip-audit / parsers).
+
+fastapi==0.162.0
+# Pinned alongside fastapi so the framework pair is reproducible: the 0.115 line
+# resolved to starlette 0.41.3, which carries several fixed-later CVEs.
+starlette==1.10.0
+uvicorn[standard]==0.30.6
+sqlalchemy[asyncio]==2.0.35
+aiomysql==0.3.2
+pydantic==2.9.2
+pydantic-settings==2.5.2
+PyJWT==2.15.1
+python-multipart==0.0.32
+httpx==0.27.2
+certifi==2026.10.23
+redis==5.0.8
+apscheduler==3.10.4
+# Payment SDK: MUST be python-alipay-sdk (provides `from alipay import AliPay`).
+# Do NOT switch to alipay-sdk-python - see docs/dependency-notes.md
+python-alipay-sdk==3.3.0
+pycryptodomex==3.23.0
+pyOpenSSL==26.4.0
+Pillow==13.0.0
+cos-python-sdk-v5==1.9.32
+python-dotenv==1.2.4
+# Pinned to satisfy python-alipay-sdk -> pyOpenSSL (requires >=45)
+cryptography==50.0.1
+aiosqlite==0.20.0
+ephem==4.1.5
+
+# NOTE: every pin above is a version pip-audit reports free of known
+# vulnerabilities; bumping any of them means re-running
+# `pip-audit -r requirements.txt` before merging.

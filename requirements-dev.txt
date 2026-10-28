@@ -1,0 +1,14 @@
+# 开发/测试/CI 专用依赖；生产部署只装 requirements.txt
+# 用法：pip install -r requirements-dev.txt
+
+# 测试
+pytest==8.3.4
+pytest-asyncio==0.25.0
+pytest-cov==6.0.0
+
+# 静态检查与格式化
+ruff==0.8.4
+mypy==1.14.0
+
+# 依赖漏洞扫描（CI 中执行，见 .github/workflows/ci.yml）
+pip-audit==2.7.3

@@ -1,0 +1,61 @@
+# Security Policy
+
+## 报告漏洞
+
+请**不要**在公开 Issue 中披露安全问题。请通过 GitHub Security Advisories
+（仓库页 → Security → Report a vulnerability）私下报告，并附上：
+
+- 影响版本 / commit
+- 复现步骤与最小样本
+- 影响面评估（越权、资金、数据泄露等）
+
+我们会在 72 小时内确认，并在修复发布后致谢（如你愿意署名）。
+
+## 安全默认
+
+本项目按「默认安全、失败即拒绝」设计：
+
+- 启动自检 fail-closed：`JWT_SECRET_KEY`、`ADMIN_TOKEN`、`SENSITIVE_FIELD_KEY`
+  缺失、过短或仍是 `.env.example` 的示例值时拒绝启动；生产环境额外校验 CORS、
+  管理二次密码、AI 标识主体等。
+- `PAYMENT_MOCK=true` 仅允许非生产环境；生产环境启动即拒绝，接口本身也返回 403。
+- 支付回调：验签（微信 APIv3 平台证书/公钥 + 5 分钟时间戳窗口；支付宝 RSA2）+
+  金额校验 + 幂等 + CAS 原子履约，防止重放与并发超发。
+- 会话：JWT 算法白名单、校验 aud/iss，httpOnly Cookie；登出/禁用经 jti 黑名单即时失效。
+- 状态变更请求的 CSRF 防护：`/api/*` 要求同源 Origin（或 Bearer 令牌、或支付平台回调），
+  其他路径走双提交 Cookie。**不依赖 Cookie 的 SameSite 兜底**——把
+  `AUTH_COOKIE_SAMESITE` 设为 `none`（跨域部署）时防护依然有效。
+- 资源归属：所有订单/权益/报告类接口按 `user_id` 过滤，越权访问一律按「不存在」返回。
+- 敏感字段（收款账号、实名）落库加密；`SENSITIVE_FIELD_KEY` 一旦丢失，已加密数据不可恢复。
+- 上传：content-type 白名单 + 文件头魔数 + 流式体积上限 + 像素上限；全局请求体上限 8MB。
+- 限流、管理端 IP 白名单、管理令牌爆破锁定、审计日志均内置于 core；
+  Redis 故障时的降级方向由 `REDIS_FAIL_CLOSED` 决定（默认拦截）。
+
+## 插件的信任边界
+
+插件是与 core **同进程、同权限**的 Python 包：持有数据库会话、可读 `settings` 中的
+支付密钥与 `SENSITIVE_FIELD_KEY`、可注册任意路由。底座只做能力登记与权益核销，
+**不提供沙箱**，也无法提供（Python 进程内隔离挡不住同进程代码）。
+
+因此：只安装经过审计的插件代码，把 `app/plugins/` 视为与 `app/core/` 同级的可信代码；
+第三方插件上线前必须走代码评审，不要把「插件」当成安全隔离层。
+
+## 已知残余风险
+
+- 访问令牌有效期默认 7 天（`JWT_EXPIRE_DAYS`），无刷新令牌机制；缩短有效期需自行接入
+  刷新流程。登出即时失效依赖 Redis 黑名单：未配置 Redis（SQLite 轻量模式）时，
+  令牌在自然过期前始终有效。
+- 支付回放不另建 nonce 表：微信侧有 5 分钟时间戳窗口，且重复回调经 CAS 幂等处理，
+  不会二次履约；如需更严的报文级去重，应在网关层加 nonce 缓存。
+- `docker-compose.yml` 的镜像标签是可覆盖的次版本标签（`mysql:8.0` 等），不是 digest。
+  强可复现性要求下，请把 `MYSQL_IMAGE` / `REDIS_IMAGE` / `NGINX_IMAGE` / `PYTHON_IMAGE`
+  固定为 `@sha256:` 摘要。
+
+## 部署方责任
+
+- 替换 `.env` 中所有示例密钥，生产必须 `APP_ENV=production`（示例值会被启动自检拦下）。
+- 仅通过 HTTPS 对外；MySQL / Redis 不对公网暴露（随附 compose 不发布这两个端口）。
+- 定期执行 `pip-audit -r requirements.txt` 并升级依赖（CI 已阻断带已知 CVE 的版本）。
+- 妥善离线保管 `SENSITIVE_FIELD_KEY`。
+- 如修改 `app/plugins/` 或 `app/core/`，同步跑 `pytest`：CI 会在 SQLite 与 MySQL 8
+  两种数据库上执行同一套用例。
