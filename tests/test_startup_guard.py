@@ -1,4 +1,6 @@
-"""生产环境红线：模拟支付、示例密钥、Redis 可达性必须被启动自检拒绝。"""
+"""生产环境红线：模拟支付、示例密钥、Redis 可达性、未确认的法定义务缺口必须被启动自检拒绝。"""
+import logging
+
 import pytest
 
 from app.config import settings
@@ -16,6 +18,9 @@ def _prod_ready(monkeypatch):
     monkeypatch.setattr(settings, "ADMIN_OPERATE_PASSWORD", "strong-operate-password", raising=False)
     monkeypatch.setattr(settings, "AI_MARK_PROVIDER_NAME", "Example Provider", raising=False)
     monkeypatch.setattr(settings, "DB_TYPE", "sqlite", raising=False)
+    # 合规缺口确认位默认 False（未确认即拒启动），这里默认打开，
+    # 免得每个用例都因它失败而看不见自己要测的那一项——它本身另有专门用例覆盖。
+    monkeypatch.setattr(settings, "COMPLIANCE_DECISIONS_ACK", True, raising=False)
 
 
 def test_mock_payment_blocked_in_production(monkeypatch):
@@ -94,3 +99,57 @@ def test_fail_open_redis_is_loud_in_production(monkeypatch, caplog):
     monkeypatch.setattr(settings, "REDIS_FAIL_CLOSED", False, raising=False)
     _startup_check()  # 不阻断（属主取舍），只要求留痕
     assert "REDIS_FAIL_CLOSED" in caplog.text
+
+
+# ---------------- 法定义务缺口的确认闸门（COMPLIANCE_DECISIONS_ACK） ----------------
+
+def _prod_no_ack(monkeypatch):
+    _prod_ready(monkeypatch)
+    monkeypatch.setattr(settings, "PAYMENT_MOCK", False, raising=False)
+    monkeypatch.setattr(settings, "COMPLIANCE_DECISIONS_ACK", False, raising=False)
+
+
+def test_unconfirmed_compliance_gaps_block_production(monkeypatch):
+    """三项都没确认处置时生产起不来：把「有人决定过」变成上线的硬前置。
+
+    这条门禁不是把默认值改成打开——那会推翻项目已记录的决策、并让没接 UI 的部署全员下不了单；
+    它要求的是显式确认，确认前后差异只有一行 .env，但静默裸奔的路径被彻底堵死。
+    """
+    _prod_no_ack(monkeypatch)
+    with pytest.raises(RuntimeError) as exc:
+        _startup_check()
+    msg = str(exc.value)
+    for item in ("ENFORCE_PAYMENT_DISCLAIMER", "WITHDRAW_TAX_ENABLED", "年龄门槛"):
+        assert item in msg, f"{item} 未进入阻断项：{msg}"
+    assert "COMPLIANCE_DECISIONS_ACK" in msg
+
+
+def test_acked_compliance_gaps_boot_but_stay_loud(monkeypatch, caplog):
+    """确认后放行启动，但仍逐条以 ERROR 留痕：确认不等于闭嘴。"""
+    _prod_ready(monkeypatch)
+    monkeypatch.setattr(settings, "PAYMENT_MOCK", False, raising=False)
+    with caplog.at_level(logging.WARNING):
+        _startup_check()
+    loud = [r for r in caplog.records if any(k in r.getMessage() for k in
+            ("ENFORCE_PAYMENT_DISCLAIMER", "WITHDRAW_TAX_ENABLED", "年龄门槛"))]
+    assert len(loud) == 3, [r.getMessage() for r in loud]
+    assert all(r.levelname == "ERROR" for r in loud), [(r.levelname, r.getMessage()) for r in loud]
+
+
+def test_opened_switches_shrink_the_gap_list(monkeypatch, caplog):
+    """打开一项，阻断项就少一条：闸门数的是真实缺口，不是一律拒绝。"""
+    _prod_no_ack(monkeypatch)
+    monkeypatch.setattr(settings, "ENFORCE_PAYMENT_DISCLAIMER", True, raising=False)
+    monkeypatch.setattr(settings, "WITHDRAW_TAX_ENABLED", True, raising=False)
+    with pytest.raises(RuntimeError) as exc:
+        _startup_check()
+    msg = str(exc.value)
+    assert "年龄门槛" in msg
+    assert "ENFORCE_PAYMENT_DISCLAIMER" not in msg and "WITHDRAW_TAX_ENABLED" not in msg
+
+
+def test_compliance_gate_does_not_reach_local_runs(monkeypatch):
+    """本地/演示链路（cp .env.example .env 即起）不受这道闸门约束。"""
+    monkeypatch.setattr(settings, "APP_ENV", "development", raising=False)
+    monkeypatch.setattr(settings, "COMPLIANCE_DECISIONS_ACK", False, raising=False)
+    _startup_check()  # 不抛异常即通过

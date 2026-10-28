@@ -267,17 +267,26 @@ def _startup_check():
                               "退款重试耗尽、掉单金额不符、对账差错等 ERROR 仅落容器 stdout，"
                               "需人工轮询日志才能发现（建议配企业微信或钉钉群机器人）")
         # 合规缺口：默认关闭是为了不阻断开箱即用的演示，但生产上线必须由运营逐项确认。
-        # 这些不是代码缺陷（能力已实现且有留痕表），而是「开关尚未打开」的法定义务缺口，
-        # 每次启动都留一条 ERROR 级记录，避免它在无数次发布中被悄悄遗忘。
+        # 这些不是代码缺陷（能力已实现且有留痕表），而是「开关尚未打开」的法定义务缺口。
+        # 处置：未显式确认过就**拒绝启动**（errors），确认后置 COMPLIANCE_DECISIONS_ACK=true，
+        # 之后每次启动仍以 ERROR 级逐条留痕。理由：一条每天都响的告警响到第 30 天就没人看了，
+        # 「默认关闭」和「没人决定过」在日志里长得一模一样，而法定义务缺口静默到真实用户面前
+        # 才是最大的风险；把决定这一步变成上线前的硬前置，成本是一行 .env。
+        gaps = []
         if not settings.ENFORCE_PAYMENT_DISCLAIMER:
-            advisories.append("ENFORCE_PAYMENT_DISCLAIMER=false：下单不校验支付前免责勾选的服务端留痕，"
-                              "「不勾也能付款」；接入勾选 UI 后请置 true 闭合告知义务")
+            gaps.append("ENFORCE_PAYMENT_DISCLAIMER=false：下单不校验支付前免责勾选的服务端留痕，"
+                        "「不勾也能付款」；接入勾选 UI 后请置 true 闭合告知义务")
         if not settings.WITHDRAW_TAX_ENABLED:
-            advisories.append("WITHDRAW_TAX_ENABLED=false：推广佣金提现不代扣个人所得税，"
-                              "平台仍须自行履行代扣代缴/申报义务")
-        advisories.append("年龄门槛（原 A8 成年声明/监护同意）已按属主决策于 2026-09-11 关闭："
-                          "minor_guard.gate_payer/gate_bio 恒放行，下单与建档不再做未成年人拦截；"
-                          "若业务面向未成年人不可及场景，需在运营侧另做限制")
+            gaps.append("WITHDRAW_TAX_ENABLED=false：推广佣金提现不代扣个人所得税，"
+                        "平台仍须自行履行代扣代缴/申报义务")
+        gaps.append("年龄门槛（原 A8 成年声明/监护同意）已按属主决策于 2026-09-11 关闭："
+                    "minor_guard.gate_payer/gate_bio 恒放行，下单与建档不再做未成年人拦截；"
+                    "若业务面向未成年人不可及场景，需在运营侧另做限制")
+        if settings.COMPLIANCE_DECISIONS_ACK:
+            advisories.extend(gaps)
+        else:
+            errors.extend(g + "（本部署尚未确认处置，置 COMPLIANCE_DECISIONS_ACK=true 后方可启动）"
+                          for g in gaps)
         advisories.append("设备码登录（POST /api/auth/login 传 device_code）为长期有效凭证："
                           "持码即可登录对应账号，无有效期与二次校验；请勿把设备码当作对外可分享的入口")
     elif settings.PAYMENT_MOCK:

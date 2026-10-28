@@ -88,6 +88,17 @@ class Settings(BaseSettings):
     # 因此默认保持「最高级别告警」。置 True 后这两项在生产环境升级为**阻断项**（fail-closed），
     # 适合有固定出口 IP / 已接入堡垒机、且能接受配错即起不来的部署。
     SECURITY_STRICT_IP_POLICY: bool = False
+    # 法定义务缺口的「本部署已逐项处置」确认位（默认 False = 生产环境拒绝启动）。
+    # 背景：底座里有三项合规控制处于关闭状态——支付前免责勾选的服务端校验
+    # （ENFORCE_PAYMENT_DISCLAIMER）、佣金提现代扣个税（WITHDRAW_TAX_ENABLED）、
+    # 年龄门槛（minor_guard 按项目决策恒放行）。它们的默认关闭都有正当理由
+    # （不阻断开箱即用的演示、重新开启需业务侧先接 UI），但「默认关闭」和「没人决定过」
+    # 在日志里长得一模一样：启动自检每天响一次 ERROR，响到第 30 天就没人看了，
+    # 于是一个从未被处置的法定义务缺口可以一路静默到真实用户面前。
+    # 因此生产环境要求有人显式确认：COMPLIANCE_DECISIONS_ACK=true 表示「这三项我已逐条
+    # 判断过本部署的处置」，确认后仍以 ERROR 级逐条留痕（不静默），但不再拦启动。
+    # 非生产环境不受此约束——本地/演示链路必须能直接起。
+    COMPLIANCE_DECISIONS_ACK: bool = False
     # JWT（H1：默认空值 fail-closed，任何环境未显式配置都会被启动自检拦截，不再放行已知默认密钥）
     JWT_SECRET_KEY: str = ""
     JWT_ALGORITHM: str = "HS256"

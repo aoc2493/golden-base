@@ -55,11 +55,17 @@ REDIS_PASSWORD=<强密码>
   `X-Proxy-Auth`（本仓库 `nginx/nginx.conf` 已注入），否则限流与管理端爆破锁定可被伪造头绕过。
 - `.env.example` 里的 `dev-*` 示例口令（JWT/ADMIN_TOKEN/SENSITIVE_FIELD_KEY/DB_PASSWORD/
   REDIS_PASSWORD）在生产启动时按值阻断，照抄示例文件上不了线。
-- 合规开关默认按「开箱可用」关闭，上线前逐项确认（启动日志会以 ERROR 级重复提示）：
-  `ENFORCE_PAYMENT_DISCLAIMER=true`（支付前免责勾选的服务端校验）、
+- 三项法定义务控制默认按「开箱可用」关闭，而生产环境要求有人显式确认过才允许启动：
+  先逐项判断本部署的处置，再在 `.env` 写明 `COMPLIANCE_DECISIONS_ACK=true`；
+  未确认时启动自检把当前仍关闭的项列为阻断项（拒绝启动），确认后每次启动仍以 ERROR 级
+  逐条留痕。可选的处置：
+  `ENFORCE_PAYMENT_DISCLAIMER=true`（支付前免责勾选的服务端校验，需前端先接签署 UI）、
   `WITHDRAW_TAX_ENABLED=true`（佣金提现代扣个税，税率见 `WITHDRAW_TAX_RATE`）。
-- 年龄门槛（成年声明 / 监护人同意）已按属主决策于 2026-09-11 关闭，
-  `minor_guard` 恒放行；若业务可能触达未成年人，需在运营侧另做限制。
+- 年龄门槛（成年声明 / 监护人同意）已按属主决策于 2026-09-11 关闭，`minor_guard` 恒放行；
+  这条决定不在 `.env` 里（刻意不做成开关：法定义务做成配置项，一次改动就能静默关掉且不留痕），
+  重新打开要改 `app/core/services/minor_guard.py` 的 `gate_payer` / `gate_bio`，
+  判据（周岁推算、农历换算、留痕）都已实现并有测试。若业务可能触达未成年人，
+  需在运营侧另做限制或把门槛打开。
 
 ## 3. 部署
 
