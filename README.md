@@ -84,7 +84,11 @@ pytest
 购买链路与越权保护；`test_membership_fulfillment` 锁会员权益顺延；`test_payment_idempotent`、
 `test_refund_state`、`test_concurrent_claims` 验重复回调下的抢占语义（履约权与退款权都靠带条件的
 原子 UPDATE 抢，抢不到就幂等返回）；`test_invoice_guard` 钉住开票资格判据与退款联动（已退款不开票、
-一单一票靠唯一约束而不是先查后插）；`test_guards_wired` 检查「文档里承诺的安全开关确实接在代码上」；
+一单一票靠唯一约束而不是先查后插）；`test_minor_guard_census` 钉住周岁推算的边界（生日当天、
+闰日、非法日期、农历换算缺插件时的降级）；`test_crypto_field` 验敏感字段加解密往返、篡改与换密钥
+的失败口径，并断言「最坏长度的姓名/账号加密后仍放得进列宽」；`test_reconcile` 覆盖渠道账单解析与
+七类对账差错的判定方向（金额不符一律不自动履约、掉单才走回调同源入口补发且补发后仍留痕）；
+`test_guards_wired` 检查「文档里承诺的安全开关确实接在代码上」；
 `test_startup_guard` 覆盖生产启动自检（含 Redis 连通性门禁）；`test_schema_consistency` 逐表逐列比对
 `sql/init.sql` 与 ORM（含索引覆盖）；`test_security_hardening` 锁住请求头注入、图片地址白名单、
 CSRF 来源判定等已修复的缺口。
