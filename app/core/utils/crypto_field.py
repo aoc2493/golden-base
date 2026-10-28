@@ -30,8 +30,12 @@ logger = logging.getLogger(__name__)
 
 _PREFIX = "enc:v1:"
 _NONCE_LEN = 12
-# 明文列宽上限：加密后体积会膨胀（nonce 12 + tag 16 + base64 4/3 + 前缀 7），
-# 50 字符的姓名加密后约 100 字符，故 SQL 侧把相关列放宽到 180/255（列宽定义见 init.sql）。
+# 明文列宽上限：加密后体积按 **UTF-8 字节数**（不是字符数）膨胀：
+# 前缀 7 + base64(nonce 12 + 明文字节 + tag 16)。50 个汉字（150 字节）→ 247 字符，
+# 100 个汉字（300 字节）→ 447 字符；同字符数的 ASCII 只有 111 / 151。
+# 所以相关列宽按接口 max_length 允许的最坏明文实测取 512（口径常驻校验见
+# tests/test_crypto_field.py::test_worst_case_ciphertext_fits_the_column，
+# 存量库见 sql/migrations/0005_encrypted_field_width.sql）。
 _KEY_CACHE = None
 _NO_KEY_WARNED = False
 

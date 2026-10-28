@@ -379,10 +379,13 @@ class Distributor(Base):
     level_updated_at = Column(DateTime, nullable=True, comment="最近一次等级变更时点")
     exam_passed = Column(SmallInteger, default=0, comment="是否通过合规入门考试（0未过/1已过）")
     consent_signed_at = Column(DateTime, nullable=True, comment="《合规推广承诺书》签署时点")
-    # A6：提现实名 AES-256-GCM 加密落库（见 utils/crypto_field.py）。列宽从 50 放到 180：
-    # 密文比明文长（nonce 12 + tag 16 + base64 膨胀 4/3 + 前缀），不放宽会在 MySQL 下报
-    # 1406 Data too long 而让整个提现事务失败（用户永远提不了现）。
-    real_name = Column(String(180), nullable=True, comment="提现实名（密文，风控比对收款人一致）")
+    # A6：提现实名 AES-256-GCM 加密落库（见 utils/crypto_field.py）。
+    # 列宽按「接口允许的最坏明文」实测密文长度定，而不是按字符数估：字段不限字符集，
+    # 50 个汉字是 150 字节，密文 = 前缀7 + base64(nonce12 + 150 + tag16) = 247 字符。
+    # 原 180 是 ASCII 口径（同 50 字符只 111 长），MySQL 严格模式会报 1406 让整个提现
+    # 事务失败，非严格模式静默截断——截断的密文永远解不开，收款人信息不可恢复。
+    # 口径由 tests/test_crypto_field.py::test_worst_case_ciphertext_fits_the_column 钉住。
+    real_name = Column(String(512), nullable=True, comment="提现实名（密文，风控比对收款人一致）")
     frozen_until = Column(DateTime, nullable=True, comment="违规冻结到期时点（中度冻结7天）；未到期为冻结态")
     link_disabled = Column(SmallInteger, default=0, comment="断链：1=专属链接/二维码停用，暂停新增归因绑定")
     created_at = Column(DateTime, default=datetime.now, server_default=func.now())
@@ -437,9 +440,10 @@ class Withdrawal(Base):
     channel = Column(String(10), nullable=False)
     # A6：收款人姓名与账号均属敏感个人信息（账号泄露即可直接造成资金损失），
     # AES-256-GCM 加密落库；展示一律走 mask_* 脱敏，只有后台提现详情（二次密码门禁）
-    # 才解密明文供打款。列宽放宽理由同 Distributor.real_name。
-    account_name = Column(String(180), nullable=False, comment="收款人姓名（密文）")
-    account_no = Column(String(255), nullable=False, comment="收款账号（密文）")
+    # 才解密明文供打款。列宽口径同 Distributor.real_name——按接口允许的最坏明文实测
+    # 密文长度（姓名 50 汉字→247，账号 100 汉字→447），不是按字符数估。
+    account_name = Column(String(512), nullable=False, comment="收款人姓名（密文）")
+    account_no = Column(String(512), nullable=False, comment="收款账号（密文）")
     remark = Column(String(200), nullable=True)
     # V1.3 第三十条：非推广员原因失败返还当次次数（置 1 后不计入当日 2 次限额）；违规冻结导致的不返还
     count_refunded = Column(SmallInteger, default=0, comment="1=当次提现次数已返还，不占每日限额")
