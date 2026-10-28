@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 # Cookie 名称（httpOnly Cookie 存 token，兼容旧版 localStorage）
 AUTH_COOKIE_NAME = "auth_token"
 
-# P2（#6 CSRF）：跨域部署（SameSite=none）下 Cookie 会随跨站请求自动携带，
+# #6 CSRF：跨域部署（SameSite=none）下 Cookie 会随跨站请求自动携带，
 # 此时必须由前端 fetch 统一附加一个自定义头作为「同源意图」证明。
 # 跨站攻击者用 <form> 提交无法设置自定义头；用 fetch 设置则会触发 CORS 预检，
 # 而 CORS_ORIGINS 生产不放行 *，预检必被拒——两条路都走不通，CSRF 即被阻断。
@@ -66,7 +66,7 @@ def create_jwt_token(user_id: int, expire_days: int = None) -> Tuple[str, str]:
 
 def decode_jwt_token(token: str) -> dict:
     """解码并校验 JWT（aud/iss/exp/signature），返回 payload。
-    失效/伪造/跨服务混淆一律抛 HTTPException(401)，对外统一文案（审计 L2）：
+    失效/伪造/跨服务混淆一律抛 HTTPException(401)，对外统一文案：
     区分「token 已过期/无效/跨服务」会泄露太多状态，统一返回「未登录或登录已失效」，
     客户端拿到的 detail 不可枚举，原文仅入日志便于排查。"""
     try:
@@ -110,7 +110,7 @@ async def add_to_blacklist(user_id: int, jti: str, ttl_seconds: int) -> bool:
     返回 True 表示「已撤销 / 无需撤销」，False 表示「撤销失败，该 token 在自然
     过期前仍然有效」。
 
-    【安全审计修复 M7】原实现返回 None 且异常只在内部 warning：调用方无从区分
+    原实现返回 None 且异常只在内部 warning：调用方无从区分
     「已拉黑」与「Redis 故障、什么都没做」，退出登录一律回「已退出登录」。
     共享设备场景下用户据此认为会话已失效，实际 token 仍可继续使用到自然过期；
     而服务端日志只有一条 warning，事故复盘时无法回答「谁在何时退出失败」。
@@ -145,7 +145,7 @@ async def add_user_to_blacklist(user_id: int, ttl_seconds: int = None) -> None:
         logger.warning(f"写入用户黑名单失败 uid={user_id}: {e}")
 
 
-# ============ 设备码「已释放」标记（安全审计修复 M8） ============
+# ============ 设备码「已释放」标记============
 # 设备码是外部浏览器下的长期登录凭证（无口令、无过期、登出不影响），一旦落在
 # 共享/二手设备上就等于把账号交给下一个人。此前没有任何处置手段：用户退出登录后
 # 该码仍绑定原账号，任何人打开页面即进入；而「解绑」若只把 users.device_code 置空，
@@ -209,10 +209,10 @@ async def _is_user_blacklisted(user_id: int) -> bool:
 
 
 def set_auth_cookie(response: Response, token: str, request: Request) -> None:
-    """M4：在响应上设置 httpOnly Auth Cookie。"""
+    """在响应上设置 httpOnly Auth Cookie。"""
     # SameSite：跨域部署（前端域名 ≠ API 域名）时用 none + Secure
     samesite = settings.AUTH_COOKIE_SAMESITE or "lax"
-    # P3-4: 生产环境全站 HTTPS，Cookie 恒置 Secure；跨域(SameSite=none)时同样需要
+    # 生产环境全站 HTTPS，Cookie 恒置 Secure；跨域(SameSite=none)时同样需要
     secure = samesite.lower() == "none" or settings.is_prod_env
     response.set_cookie(
         key=AUTH_COOKIE_NAME,
@@ -259,7 +259,7 @@ async def get_current_user(
     if not token:
         raise HTTPException(status_code=401, detail="未登录或登录已失效")
 
-    # P2（#6 CSRF）：Cookie 会话 + 不安全方法 + 跨域部署（SameSite=none）三者同时成立时，
+    # #6 CSRF：Cookie 会话 + 不安全方法 + 跨域部署（SameSite=none）三者同时成立时，
     # 要求请求携带自定义头证明同源意图；缺失即视为跨站伪造，拒绝。
     if (token_from_cookie
             and request.method.upper() in _UNSAFE_METHODS

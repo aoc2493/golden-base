@@ -72,7 +72,7 @@ class Capability:
             if not self.member_view_sku:
                 raise ValueError(
                     f"能力 {self.code}: 会员覆盖且非免费时必须提供 member_view_sku")
-        # 独立券只允许运行期无关的下单型（与 scaffold G2 同口径）
+        # 独立券只允许运行期无关的下单型（与 scaffold 同口径）
         if self.independent_coupon and self.billing_model != BILLING_ORDER:
             raise ValueError(
                 f"能力 {self.code}: independent_coupon 仅支持 billing_model=order")

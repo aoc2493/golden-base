@@ -1,8 +1,8 @@
-"""管理端全量数据映射（v8）：把此前只在库里、后台看不到的数据全部暴露给运营后台。
+"""管理端全量数据映射：把此前只在库里、后台看不到的数据全部暴露给运营后台。
 
 背景：管理后台是站内最高权限入口，运营者需要看到系统全部数据：
 - 审计日志 admin_operation_logs（此前只写不读，118 条沉在库里）
-- 合规留痕 compliance_consents、AI 生成留痕 ai_generation_logs（A4 留存表）
+- 合规留痕 compliance_consents、AI 生成留痕 ai_generation_logs（留存表）
 - 用户反馈 feedbacks（H5 有提交入口，后台无查看界面，反馈石沉大海）
 - 系统配置 system_configs（改公告/开关只能直接改库）
 - 归因触达 attribution_touches、会员流水 membership_ledger、
@@ -34,7 +34,7 @@ from app.core.models import (
     Report, CommissionFailLog,
 )
 
-# P3 修复：router 级限流（与 admin.py 同口径，见其 _admin_router_rate_limit 注释）
+# router 级限流（与 admin.py 同口径，见其 _admin_router_rate_limit 注释）
 router = APIRouter(prefix="/admin", tags=["管理端-全量数据"],
                    dependencies=[Depends(_admin_router_rate_limit)])
 
@@ -172,7 +172,7 @@ async def admin_configs(db: AsyncSession = Depends(get_db),
                              for r in rows]})
 
 
-# 【L5 修复】可写配置键白名单：system_configs 的消费方全仓枚举
+# 可写配置键白名单：system_configs 的消费方全仓枚举
 # （config_helper 的 get_config/get_bool/get_float/get_int 全部调用点
 #  + main.py 初始化种子 + system.py 公开配置白名单 _PUBLIC_KEYS）。
 # 原实现允许创建任意 ≤50 字符的新键——当前虽无敏感消费方，但「管理令牌即全量写」
@@ -209,7 +209,7 @@ async def admin_config_update(request: Request,
     if key not in _CONFIG_WRITABLE_KEYS:
         return error(ErrorCode.PARAM_ERROR,
                      "该配置键不在可写白名单内；新增配置项需在后端 _CONFIG_WRITABLE_KEYS 登记后再开放")
-    # P3 修复：value 收敛为非空字符串且 ≤2000 字符——原实现任意 JSON 都照单写入，
+    # value 收敛为非空字符串且 ≤2000 字符——原实现任意 JSON 都照单写入，
     # 一条大对象/数字/嵌套结构会让消费方按 str 读值时行为不可预期。
     value = payload.get("value")
     if value is None or not isinstance(value, str) or not value.strip():
@@ -231,7 +231,7 @@ async def admin_config_update(request: Request,
     return success({"key": key}, msg="配置已保存")
 
 
-# ---------- AI 生成留痕（A4） ----------
+# ---------- AI 生成留痕 ----------
 @router.get("/ai-logs")
 async def admin_ai_logs(page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100),
                         user_id: int = Query(None),
@@ -350,13 +350,13 @@ async def admin_performances(page: int = Query(1, ge=1), page_size: int = Query(
                                 page, page_size, filters, order_col=MonthlyPerformance.month))
 
 
-# ---------- 计佣失败记录（T5：abandoned=佣金永久丢失，需人工介入；此前后台零可见） ----------
+# ---------- 计佣失败记录（abandoned=佣金永久丢失，需人工介入；此前后台零可见） ----------
 @router.get("/commission-fails")
 async def admin_commission_fails(page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100),
                                  status: str = Query("", max_length=20),
                                  db: AsyncSession = Depends(get_db),
                                  is_admin: bool = Depends(require_admin)):
-    """T5：计佣失败记录。status pending/success/abandoned；abandoned 是重试放弃、
+    """计佣失败记录。status pending/success/abandoned；abandoned 是重试放弃、
     佣金永久未入账的盲区，运营必须能看到并人工补账，否则与该表「避免佣金静默丢失」初衷相惖。"""
     err = _deny(is_admin)
     if err:
@@ -377,7 +377,7 @@ async def admin_report_docs(page: int = Query(1, ge=1), page_size: int = Query(2
     """命书报告状态台账。status generating/completed/failed/refunded；failed 表示用户
     已付费但命书未生成成功，需人工重跑或退款——此前 admin 端对 reports 表零可见。
     列表不返回 chapters/ai_meta 大 JSON 字段，避免单次查询拉回海量正文。
-    v20：deleted_at 一并返回——refunded 行的该列即「退款软销毁」时间（用户端
+    deleted_at 一并返回——refunded 行的该列即「退款软销毁」时间（用户端
     「解读历史」「我的收藏」全部入口不可达，正文仍留在库内可复原）；completed
     行非空则是用户自助删除。"""
     err = _deny(is_admin)

@@ -10,7 +10,7 @@ import json
 
 router = APIRouter(prefix="/system", tags=["系统配置"])
 
-# T4：匿名可访问的公开配置白名单（主题、前端功能开关）；佣金比例等内部运营配置不公开
+# 匿名可访问的公开配置白名单（主题、前端功能开关）；佣金比例等内部运营配置不公开
 _PUBLIC_KEYS = {"paid_reports_enabled", "refund_enabled", "theme", "result_cache_days",
                 "distribution_enabled", "announcement", "vip_benefits"}
 
@@ -23,7 +23,7 @@ _INTERNAL_KEYS: set = set()
 # 也可由系统配置表同名键覆盖。前端按「字符串数组」渲染，元素必须是字符串。
 
 
-# ============ 能力位（体验走查修复 P0/P1）============
+# ============ 能力位 ============
 # 站点多处入口的可用性取决于运行期是否接了外部通道，此前前端一律照常展示：
 #   · 注册页摆「验证码 *」+「发送验证码」，但邮件未接入 —— 点一下就把该邮箱的
 #     注册通道堵死 10 分钟（验证码落了 Redis 却永远收不到）；
@@ -72,7 +72,7 @@ async def _load_all(db: AsyncSession) -> dict:
 
 @router.get("/config")
 async def get_public_config(db: AsyncSession = Depends(get_db)):
-    """公开配置（无需登录）：仅返回白名单内的非敏感项（T4）"""
+    """公开配置（无需登录）：仅返回白名单内的非敏感项"""
     data = await _load_all(db)
     public = {k: v for k, v in data.items() if k in _PUBLIC_KEYS}
     public.setdefault("paid_reports_enabled", True)
@@ -95,7 +95,7 @@ async def get_public_config(db: AsyncSession = Depends(get_db)):
 async def get_internal_config(db: AsyncSession = Depends(get_db),
                               user: User = Depends(get_current_user)):
     """登录后配置：与公开接口同样只返回白名单内的非敏感项。
-    原实现直接返回整张 system_configs 表，绕过了上面 T4 白名单：
+    原实现直接返回整张 system_configs 表，绕过了上面的键白名单：
     任意登录用户（注册零门槛，设备码即可拿到 token）就能读到后续新增的任何内部项，
     例如佣金比例、提现门槛、结算周期、客服话术等运营参数（改价/刷佣的前置情报）。
     全仓前后端均无任何调用方依赖本接口的“全量”语义，收紧为零风险。

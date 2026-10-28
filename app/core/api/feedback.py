@@ -27,7 +27,7 @@ async def submit_feedback(
     if not allowed:
         return error(ErrorCode.RATE_LIMIT, "提交过于频繁，请稍后再试")
 
-    # M3③（第五十七/五十八条）：反馈内容落库前过敏感词。一级拦截词 blocked → 拒绝提交；
+    # 第五十七/五十八条：反馈内容落库前过敏感词。一级拦截词 blocked → 拒绝提交；
     # 二级预警词 warned → 放行（反馈是单向提交给平台，仅在返回里文字提示，不打断）。
     sw = await compliance_svc.check_sensitive(db, req.content)
     if sw["blocked"]:

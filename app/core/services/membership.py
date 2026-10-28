@@ -1,11 +1,11 @@
 """
-会员服务 v8 —— 对齐《会员体系规则 V1.3》
+会员服务 —— 对齐《会员体系规则 V1.3》
 - 三档：月卡/年卡/终身，固定天数制（月30天、年365天、终身永久）
 - 宽限期72h：到期后权益按免费处理，仅保留 continuous_flag 连续身份标记
 - 全价升级：月→年→终身，升级按新档全价、不折算差价；旧档剩余整天叠加顺延到新档到期日
 - 续费：未到期/宽限期内在原到期时刻顺延；宽限期后视为新购
 - 额度：周期总额度为全部工具共享总池 + 单工具单日上限 + bonus 赠送额度（见 services/quota.py）
-- N3/N4/M6/L14：保留既有 MembershipLedger 发放/回滚精确清算逻辑
+- 保留既有 MembershipLedger 发放/回滚精确清算逻辑
 """
 import logging
 from datetime import datetime, timedelta
@@ -203,7 +203,7 @@ async def assert_can_buy(db: AsyncSession, user_id: int, sku_code: str) -> Optio
 async def card_redeem_block_reason(db: AsyncSession, user_id: int, sku_code: str) -> str:
     """会员卡兑换前置校验：返回非空串=拒绝原因。
 
-    M4：与 grant_membership 的降档保护配套。那里是最后一道兜底（保住数据不降档），
+    与 grant_membership 的降档保护配套。那里是最后一道兜底（保住数据不降档），
     但卡密在那条路径上已经被置 used —— 用户既没换到档位、又白扔一张卡。
     这里在「建单 / 发放之前」拦下并抛 CardRedeemError，整笔兑换事务回滚，
     卡密仍为 unused，用户可在现有会员到期后再兑，也可以转赠他人。
@@ -221,7 +221,7 @@ async def card_redeem_block_reason(db: AsyncSession, user_id: int, sku_code: str
     if not m or m.level == "none":
         return ""
     if m.level == "lifetime":
-        # 安全审计修复（卡券 × 会员额度口径 · 终身兑终身）：原先对「终身会员 + 终身卡」
+        # 原先对「终身会员 + 终身卡」
         # 直接放行（return ""），而 grant_membership 的终身分支每次发放都会重新
         # _reset_period（period_start=now、赠送额度清零）；可终身卡对终身会员**没有任何
         # 新增权益**（档位与到期日均不变），于是这次兑换唯一的效果就是「把 365 天额度
@@ -240,7 +240,7 @@ async def card_redeem_block_reason(db: AsyncSession, user_id: int, sku_code: str
 
 
 async def _get_or_create_locked(db: AsyncSession, user_id: int, now: datetime) -> UserMembership:
-    """N3：行锁获取会员记录；不存在则创建，并发唯一约束冲突时回退到重新加锁查询"""
+    """行锁获取会员记录；不存在则创建，并发唯一约束冲突时回退到重新加锁查询"""
     m = await get_membership(db, user_id, for_update=True)
     if m:
         return m
@@ -278,7 +278,7 @@ async def grant_membership(db, user_id, sku_code, order_no, days=None, order_id=
     # CommissionLog），并发重复由上游 _mark_order_paid 的 CAS 抢占挡住；此处挡的是「串行重放」——
     # 支付回调首次提交后再次投递、或经其他补触发路径二次进入本函数。已存在本单的 grant 流水即视为
     # 已发放，直接返回当前会员，避免续费到期时刻被二次顺延、重复叠加发放流水（口径对齐
-    # entitlement.grant_entitlement 的 T9 先查后返回、distribution.on_order_paid 的 CommissionLog 先查后插）。
+    # entitlement.grant_entitlement 的先查后返回、distribution.on_order_paid 的 CommissionLog 先查后插）。
     if order_id:
         granted = (await db.execute(select(MembershipLedger.id).where(
             MembershipLedger.order_id == order_id,
@@ -305,7 +305,7 @@ async def grant_membership(db, user_id, sku_code, order_no, days=None, order_id=
         # 方案B（全价）：月/年卡到期时刻一律「顺延叠加」——base 取现有未过期到期日，否则从今起算。
         # 旧档剩余整天叠加保留（升级付新档全价，不再折算补差价，已付费时长不浪费）。
         #
-        # M3 宽限期顺延：/membership/rules 的 grace 条款与本模块 docstring 都写明
+        # 宽限期顺延：/membership/rules 的 grace 条款与本模块 docstring 都写明
         # 「宽限期内续费在原到期时刻顺延」，而原条件只认 `expire_at > now`——宽限期内
         # expire_at 已经过期，base 被落到 now，用户比公示规则少得「宽限期已耗掉的时长」
         # （到期 2 天后续费就少 2 天）。公示文案即对用户的承诺，实现必须与之一致。
@@ -313,7 +313,7 @@ async def grant_membership(db, user_id, sku_code, order_no, days=None, order_id=
         in_grace_now = bool(grace_deadline and grace_deadline > now)
         base = m.expire_at if (m.expire_at and (m.expire_at > now or in_grace_now)) else now
         #
-        # M1 降档保护：当前会员仍有效（未到期，或在宽限期内）且档位高于本次发放档位时，
+        # 降档保护：当前会员仍有效（未到期，或在宽限期内）且档位高于本次发放档位时，
         # 绝不能把 level 降下来。admin_grant_membership 早已有同样判断，但本函数——
         # 「支付到账」与「卡密兑换」两条真实资损路径的唯一发放口——漏掉了：
         #   · 卡密兑换完全不经过 assert_can_buy（它只在下单那一刻校验），终身会员兑一张
@@ -384,7 +384,7 @@ async def admin_grant_membership(db, user_id, action, days=None) -> UserMembersh
             m.expire_at = base + timedelta(days=d)
             m.continuous_flag = 1
             m.rule_version = settings.MEMBERSHIP_RULE_VERSION
-            # 修复：与 grant_membership 保持一致——「失效后重开/首次发放」（base==now）必须重起
+            # 与 grant_membership 保持一致——「失效后重开/首次发放」（base==now）必须重起
             # 额度周期并清零 bonus。原实现漏掉本步，管理员补发月/年卡时会沿用旧的 period_start，
             # 使额度周期窗口错位（quota.period_window 以 period_start 为锚滚动），且过期会员残留的
             # bonus_quota/bonus_used 被带入新周期，导致额度显示与扣减都不对。
@@ -405,7 +405,7 @@ async def admin_grant_membership(db, user_id, action, days=None) -> UserMembersh
 
 async def rollback_membership(db, user_id, sku_code, order_id=None, days=None) -> None:
     """
-    退款回滚（N4/M6/L14）：
+    退款回滚：
     - 月/年卡：按该订单 ledger 发放天数精确作废；无流水（历史数据）才扣固定天数。
       即便当前 level 已变（被更高档覆盖或已过期）也落一条作废流水。
     - 终身：收回终身身份；若历史上还有未退款且未过期的月/年卡，按真实剩余时长回退。
@@ -419,7 +419,7 @@ async def rollback_membership(db, user_id, sku_code, order_id=None, days=None) -
         return
     now = datetime.now()
     if level == "lifetime":
-        # V-3：升级到终身单退款时，恢复升级前的旧档会员（月/年卡），不再一律降回 month。
+        # 升级到终身单退款时，恢复升级前的旧档会员（月/年卡），不再一律降回 month。
         old_level, left = await _remaining_membership_from_ledger(db, user_id, exclude_order_id=order_id)
         if old_level != "none" and left and left > 0:
             m.level = old_level
@@ -446,7 +446,7 @@ async def rollback_membership(db, user_id, sku_code, order_id=None, days=None) -
                 deduct = led.grant_days or 0
             db.add(MembershipLedger(user_id=user_id, order_id=order_id, order_no="",
                                     level=level, grant_days=deduct, action="rollback"))
-        # M2：原条件 `m.level == level` 在「升级后退款旧低档单」时会整体跳过重算——
+        # 原条件 `m.level == level` 在「升级后退款旧低档单」时会整体跳过重算——
         # 买月卡 → 升级年卡（level 变 year）→ 退款那张月卡单：level("month") != m.level
         # ("year")，于是只落一条作废流水而 m.expire_at 分文未减，用户白得 30 天。
         # 台账推算（_remaining_membership_from_ledger）本就排除了本单与所有已作废单，
@@ -483,7 +483,7 @@ async def rollback_membership(db, user_id, sku_code, order_id=None, days=None) -
 async def _period_anchor_from_ledger(db, user_id, exclude_order_id=None) -> Optional[datetime]:
     """推算「除本单外」此刻应有的额度周期锚（period_start）。
 
-    背景（安全审计 · 会员 × 支付 × 卡券退款链路）：
+    背景：
     grant_membership 在「新购 / 升档 / 宽限期续费」时会经 _reset_period 把 period_start
     前移（额度周期重起），但 rollback_membership 只还原档位、到期日、赠送额度与连续标记，
     **从不还原 period_start**。而 quota.period_window 以 period_start 为锚滚动、
@@ -559,7 +559,7 @@ async def _revert_period_anchor(db, m, user_id, exclude_order_id) -> None:
 
 
 async def _remaining_membership_from_ledger(db, user_id, exclude_order_id=None) -> tuple:
-    """N4/L14/V-3：推算除本次退款订单外，其他月/年卡到此刻还剩的 (档位, 天数)。
+    """推算除本次退款订单外，其他月/年卡到此刻还剩的 (档位, 天数)。
 
     按流水时间顺序推演：最后一段未作废的有效发放决定档位（月→年演进的最后一档），
     到期时刻由剩余天数推算。返回 (level, days)；无剩余时返回 ("none", 0)。"""
@@ -589,7 +589,7 @@ async def _remaining_membership_from_ledger(db, user_id, exclude_order_id=None) 
 
 
 async def expire_overdue_memberships(db: AsyncSession) -> int:
-    """M7 + 宽限期：把已过期且超过宽限期的会员 level 同步为 none。
+    """宽限期：把已过期且超过宽限期的会员 level 同步为 none。
     宽限期内（expire_at <= now < expire_at+72h）保留 level 与 continuous_flag，
     但 get_member_status 已按免费处理（is_vip=False），故此处只清理超宽限期的。
     """

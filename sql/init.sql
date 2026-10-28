@@ -227,7 +227,7 @@ CREATE TABLE IF NOT EXISTS `refunds` (
   `created_at`  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at`  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   INDEX `ix_refunds_order_id` (`order_id`),
-  -- L3：refund_no 唯一约束。退款回调可能重复投递、重试逻辑可能重复插入，无唯一键时
+  -- refund_no 唯一约束。退款回调可能重复投递、重试逻辑可能重复插入，无唯一键时
   -- 同一 refund_no 会落多行，_handle_wechat_refund 用 scalars().first() 只是掩盖症状
   -- （读到哪行不确定）。MySQL 唯一键允许多个 NULL，历史无单号行不受影响。
   UNIQUE KEY `uk_refund_no` (`refund_no`)

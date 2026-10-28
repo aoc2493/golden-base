@@ -113,7 +113,7 @@ async def record_consent(db: AsyncSession, user: User, doc_type: str, doc_versio
                          user_agent: Optional[str] = None, dist: Optional[Distributor] = None):
     """记录一次合规勾选/签署留痕（第五十九条：文本版本号、时间戳、IP/设备，保存≥3年）。
 
-    A6：agreed=0 的行表示【撤回同意】（个保法第十五条），由 services.consent.withdraw 追加。
+    agreed=0 的行表示【撤回同意】（个保法第十五条），由 services.consent.withdraw 追加。
     撤回一律是「追加一行」而不是删掉原来的同意行：留痕是法定义务，删行等于销毁证据；
     当前状态以「最新一行」为准，因此下面的 has_signed 必须按最新行判。"""
     rec = ComplianceConsent(user_id=user.id, distributor_id=(dist.id if dist else None),
@@ -131,7 +131,7 @@ async def record_consent(db: AsyncSession, user: User, doc_type: str, doc_versio
 async def has_signed(db: AsyncSession, user_id: int, doc_type: str) -> bool:
     """是否【当前】处于已签署/已同意状态（取最新一行且 agreed=1）。
 
-    A6：取最新一行，而不是「有没有 agreed=1 的行」。一旦支持撤回（services.consent 会
+    取最新一行，而不是「有没有 agreed=1 的行」。一旦支持撤回（services.consent 会
     追加 agreed=0 的行），旧口径会把已撤回的人继续当成已同意——用户明明撤回了，系统
     仍继续处理他的个人信息，且从界面上完全看不出来，这是第十五条的直接违反。
     排序用 id 而不是 agreed_at：同一秒内可能有多行（先撤回再重新同意），时间戳分不出
@@ -156,7 +156,7 @@ async def check_sensitive(db: AsyncSession, text: str) -> dict:
     二级预警词（level=2）→ warned=True（仅警告、放行，对应第六十条轻度）。
     注意：严重度与 level 数值相反（1 比 2 严重），故不用 max_level，改用 blocked/warned 两个布尔位直连规则两级处置。
 
-    M3③ 接线（命中侧）：词库维护侧（list/upsert_sensitive_word）本就由 admin.py 调用；
+    接线（命中侧）：词库维护侧（list/upsert_sensitive_word）本就由 admin.py 调用；
     命中侧此前零调用点、两级处置不生效，现挂在 core 的用户 UGC 入口：
       · user.py update_user_info（改昵称）、feedback.py submit_feedback（反馈内容）——
         blocked 拒绝（ErrorCode.CONTENT_VIOLATION）、warned 放行 + 文字提示；

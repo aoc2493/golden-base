@@ -158,7 +158,7 @@ async def settle_month(db: AsyncSession, month: str) -> dict:
     """第二十九/二十一条第2款：次月8号结算上月——按最终档位重算全部订单佣金差额一次性补发，
     并发放排行榜奖励。幂等：只处理 settled=0 的月度记录。
 
-    V-1 并发防重：调度锁在 Redis 故障时可能「降级放行」，多 worker 下本任务可能被同时执行
+    并发防重：调度锁在 Redis 故障时可能「降级放行」，多 worker 下本任务可能被同时执行
     两份；这里用 `row_lock`（MySQL SELECT ... FOR UPDATE）把当月月度记录全部锁住，并发结算
     在数据库层串行化；UPDATE 再带 `settled == 0` 的 CAS 条件兜底，只有真正把 0->1 的那一轮
     才允许入账（阶梯差额补发 + 排行榜奖金），避免重复发钱。"""
@@ -178,7 +178,7 @@ async def settle_month(db: AsyncSession, month: str) -> dict:
             final_uplift = _ladder_uplift(total)
         ladder_adjust = await _recompute_logs_uplift(db, mp.distributor_id, month, final_uplift)
         rank, reward = rank_map.get(mp.distributor_id, (None, Decimal("0.00")))
-        # V-1 CAS：settled 0->1 只允许一轮成功；rowcount==0 说明已被并发结算，跳过本行
+        # CAS：settled 0->1 只允许一轮成功；rowcount==0 说明已被并发结算，跳过本行
         cas = await db.execute(update(MonthlyPerformance).where(
             MonthlyPerformance.id == mp.id, MonthlyPerformance.settled == 0).values(
             ladder_uplift=final_uplift.quantize(Decimal("0.0001")),

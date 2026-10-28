@@ -1,4 +1,4 @@
-"""通用响应辅助 + v7 安全工具（真实IP/原子限流/金额/脱敏）"""
+"""通用响应辅助 + 安全工具（真实IP/原子限流/金额/脱敏）"""
 import secrets
 import hmac
 import time
@@ -33,7 +33,7 @@ class ErrorCode:
     # 文案「请稍后再试」；本码是「今日次数用尽，明天再试」，前端据此弹专门的提示框，
     # 混进 1004 会让用户以为等几秒就能重试。
     QUOTA_EXCEEDED = 1006
-    # A8：年龄门槛与未成年人保护（services/minor_guard）。三个码分开是因为前端的应对
+    # 年龄门槛与未成年人保护（services/minor_guard）。三个码分开是因为前端的应对
     # 完全不同，归进 PARAM_ERROR 就只能弹一句「参数错误」，用户不知道下一步该做什么：
     #   1007 需先完成成年声明 → 弹出生日期表单，提交后重放原请求；
     #   1008 需补一项确认（监护人同意 / 他人出生信息告知）→ 弹勾选框，data.gate 区分是哪一种；
@@ -42,7 +42,7 @@ class ErrorCode:
     AGE_GATE_REQUIRED = 1007
     CONSENT_REQUIRED = 1008
     MINOR_BLOCKED = 1009
-    # M3③（第五十七/五十八条）：用户提交的 UGC（昵称/反馈等）命中一级敏感词被拦截。
+    # 第五十七/五十八条：用户提交的 UGC（昵称/反馈等）命中一级敏感词被拦截。
     # 独立于 PARAM_ERROR：这不是参数格式错，而是内容违规，前端可据此弹合规提示并引导修改，
     # 与后台敏感词告警口径对齐。二级预警词不占用本码（放行 + 文字提示）。
     CONTENT_VIOLATION = 1010
@@ -54,7 +54,7 @@ class ErrorCode:
     REFUND_NOT_ELIGIBLE = 4004
     PAYMENT_FAILED = 4005
     REFUND_FAILED = 4006
-    # B1：电子发票。三个码分开的原因与 A8 同一逻辑——前端应对完全不同，
+    # 电子发票。三个码分开的原因同上——前端应对完全不同，
     # 归进 PARAM_ERROR 就只能弹一句「参数错误」：
     #   4007 该订单不满足开票条件（未支付/已退款/超自助窗口）→ 灰掉按钮并说明原因；
     #   4008 已申请过 → 直接把用户带到那条申请记录，而不是让他再填一遍表单；
@@ -63,7 +63,7 @@ class ErrorCode:
     INVOICE_DUPLICATED = 4008
     INVOICE_DISABLED = 4009
     UPLOAD_FAILED = 5002
-    # A6：敏感字段解密失败（密钥被更换或密文被篡改）。单独一个码而不归入 PARAM_ERROR：
+    # 敏感字段解密失败（密钥被更换或密文被篡改）。单独一个码而不归入 PARAM_ERROR：
     # 这不是用户传错了参数，重试也没用，必须人工介入核对密钥；后台据此码弹“联系技术”
     # 而不是“请重新提交”，也不会把密文当收款账号显示出来。
     SENSITIVE_DECRYPT_FAILED = 5003
@@ -88,7 +88,7 @@ class AdminAuthDenied(Exception):
 
 def get_client_ip(request: Request) -> str:
     """
-    获取用户真实公网 IP（N1）。
+    获取用户真实公网 IP。
     nginx 反代后 request.client.host 是容器内网 IP，必须读代理头；
     但直连部署（uvicorn 直接对外，如本机开发/轻量部署）时，X-Real-IP 与
     X-Forwarded-For 完全由客户端控制，无条件信任会让所有 IP 维度防护
@@ -96,7 +96,7 @@ def get_client_ip(request: Request) -> str:
     因此仅在显式声明 TRUST_PROXY_HEADERS=true（确定部署在会覆写这些头的可信反代之后）
     时才采纳代理头，否则一律用 TCP 对端地址。
 
-    P2 修复（P1 遗留面）：服务绑定 127.0.0.1:8000 且信任代理头时，同机任意进程
+    同机进程绕过 IP 白名单：服务绑定 127.0.0.1:8000 且信任代理头时，同机任意进程
     仍可直连后端并伪造 X-Real-IP 绕过全部 IP 防护。配置 PROXY_AUTH_SECRET 后，
     还要求请求携带反代注入的 X-Proxy-Auth 共享密钥（hmac 常量时间比对），
     三者齐备才信任代理头——伪造头在直连场景彻底失效。密钥不配置则维持原行为（兼容）。
@@ -127,8 +127,8 @@ def get_client_ip(request: Request) -> str:
     return peer
 
 
-# Redis 原子限流（M3/N13/M12/H1）：用 Lua 保证「清窗+计数+写入」原子。
-# P3（#23 滑动窗口）：原实现是 INCR+EXPIRE 的固定窗口——窗口边界处可叠加两个窗口的配额，
+# Redis 原子限流：用 Lua 保证「清窗+计数+写入」原子。
+# 滑动窗口：原实现是 INCR+EXPIRE 的固定窗口——窗口边界处可叠加两个窗口的配额，
 # 最坏 2 倍突发（例如限 10/min，在 00:59 打 10 次、01:00 再打 10 次，2 秒内 20 次全放行）。
 # 改为滑动日志（ZSET，score=毫秒时间戳）：每次请求先剔除窗口外成员再计数，
 # 任意连续 window 秒内最多 limit 次，彻底消除边界突发；代价是每键一个 ZSET（成员随请求增长，
@@ -157,8 +157,8 @@ return 1
 
 async def redis_rate_limit(redis_client, key: str, limit: int, window_seconds: int) -> bool:
     """滑动窗口限流：任意连续 window_seconds 内超过 limit 返回 False（被限流），否则 True（放行）。
-    M2：Redis 故障时的降级策略由 settings.REDIS_FAIL_CLOSED 控制——
-    False 放行避免拖垮主流程；True（默认，属主决策安全优先）拦截，防止故障窗口内无限速。
+    Redis 故障时的降级策略由 settings.REDIS_FAIL_CLOSED 控制——
+    False 放行避免拖垮主流程；True（默认，安全优先）拦截，防止故障窗口内无限速。
     「Redis 从未配置」（redis_client=None，sqlite 轻量/开发模式）不属于故障：直接放行，
     否则无 Redis 部署会被 fail-closed 全部拦死。"""
     if redis_client is None:
@@ -250,7 +250,7 @@ async def redis_release_lock_committed(db, redis_client, key: str, token: str) -
 
 
 def to_money(value) -> Decimal:
-    """统一金额转 Decimal（T7），避免 float 精度问题"""
+    """统一金额转 Decimal，避免 float 精度问题"""
     if value is None:
         return Decimal("0")
     if isinstance(value, Decimal):
@@ -259,7 +259,7 @@ def to_money(value) -> Decimal:
 
 
 def mask_account(channel: str, account: str) -> str:
-    """收款账号脱敏（M19 展示层）"""
+    """收款账号脱敏（展示层）"""
     if not account:
         return ""
     account = str(account)

@@ -146,7 +146,7 @@ class WechatLoginRequest(BaseModel):
 class SyncWechatProfileRequest(BaseModel):
     """同步微信头像/昵称：snsapi_userinfo 授权回跳的 code（一次性）+ state（CSRF 绑定）"""
     code: str = Field(..., max_length=128)
-    # H1 修复（同步微信资料 CSRF）：必须回传 profile-authorize-url 下发的 state，
+    # 同步微信资料 CSRF：必须回传 profile-authorize-url 下发的 state，
     # 且其 nonce 要与发起浏览器 Cookie 匹配，否则拒绝——防「攻击者用自己的 code
     # 诱导受害者打开链接，把攻击者微信绑到受害者账号后走微信登录接管账号」。
     state: Optional[str] = Field(None, max_length=256)
@@ -177,7 +177,7 @@ class OrderCreateRequest(BaseModel):
     channel: Optional[str] = Field(None, pattern="^(wechat|alipay)$")
     result_ref_id: Optional[int] = None
     biz_data: Optional[Dict[str, Any]] = Field(None, description="业务快照")
-    # A8：年龄门槛的两项确认标记（services/minor_guard.gate_bio）。
+    # 年龄门槛的两项确认标记（services/minor_guard.gate_bio）。
     # 放在顶层而不是塞进 biz_data：biz_data 会进订单快照并参与 _norm_biz 比对，
     # 勾选状态一变就会被判为「业务快照已变更」而作废旧单重建，白丢一张待支付订单；
     # 它也绝不能进 biz_key，否则同一份出生信息会因为一个勾选差异被算成两把钥匙、重复收费。
@@ -187,7 +187,7 @@ class OrderCreateRequest(BaseModel):
     @field_validator("biz_data")
     @classmethod
     def _limit_biz_size(cls, v):
-        # T15：限制 biz_data 序列化后不超过 4KB，防止超大 JSON 占库
+        # 限制 biz_data 序列化后不超过 4KB，防止超大 JSON 占库
         if v is not None and len(json.dumps(v, ensure_ascii=False)) > 4096:
             raise ValueError("业务参数过大")
         return v
@@ -243,20 +243,20 @@ class AdminAuditRequest(BaseModel):
     remark: Optional[str] = Field(None, max_length=200)
     # V1.3 第三十条失败返还：驳回时是否返还当日提现次数。True=非推广员原因(默认,返还)；False=违规冻结导致(不返还)
     refund_count: bool = Field(True, description="驳回时是否返还当日提现次数（违规冻结导致的驳回传 false）")
-    operate_password: Optional[str] = Field(None, max_length=64, description="N20 敏感操作二次密码")
+    operate_password: Optional[str] = Field(None, max_length=64, description="敏感操作二次密码")
 
 
 class AdminRefundRequest(BaseModel):
     reason: str = Field(..., max_length=100)
     remark: Optional[str] = Field(None, max_length=200)
-    operate_password: Optional[str] = Field(None, max_length=64, description="N20 敏感操作二次密码")
+    operate_password: Optional[str] = Field(None, max_length=64, description="敏感操作二次密码")
 
 
 class AdminMembershipRequest(BaseModel):
     action: str = Field(..., pattern="^(grant_month|grant_year|grant_lifetime|revoke)$")
     days: Optional[int] = Field(None, ge=1, le=3650)
     remark: Optional[str] = Field(None, max_length=200)
-    operate_password: Optional[str] = Field(None, max_length=64, description="N20 敏感操作二次密码")
+    operate_password: Optional[str] = Field(None, max_length=64, description="敏感操作二次密码")
 
 
 # ===== 分销 V1.3：用户端合规钩子 =====
@@ -290,16 +290,16 @@ class ExamSubmitRequest(BaseModel):
         return out
 
 
-# A6：合规文书类型白名单（与 services/consent.CONSENT_ITEMS 一一对应）。
+# 合规文书类型白名单（与 services/consent.CONSENT_ITEMS 一一对应）。
 # 写在模块级而不在两个 Request 里各抄一份：两边抄必然走偏（新增一类授权时只改了一处，
-# 另一处会把合法请求拦成 422）。A8 新增的三类（成年声明/监护人同意/他人出生信息告知）
+# 另一处会把合法请求拦成 422）。新增的三类（成年声明/监护人同意/他人出生信息告知）
 # 必须一并登记，否则「隐私授权管理」页上可撤回项的「重新同意」按钮会被 422 拦死。
 CONSENT_DOC_TYPES = ("^(privacy_policy|promoter_commitment|payment_disclaimer|rule_change"
                      "|adult_declaration|guardian_consent|third_party_bio)$")
 
 
 class AgeDeclarationRequest(BaseModel):
-    """A8：成年声明（自报公历出生日期，服务端据此推算周岁）。
+    """成年声明（自报公历出生日期，服务端据此推算周岁）。
 
     【接线状态】无调用点：它服务的 POST /api/user/age-declaration 已随年龄门槛整体关闭下架
     （见 api/user.py），故 FastAPI 也不会把它收进 /docs。保留是为了重新开启门槛时不必重设计
@@ -318,19 +318,19 @@ class AgeDeclarationRequest(BaseModel):
 
 
 class ConsentSignRequest(BaseModel):
-    """第十二/五十六/五条 + A6：合规文书主动勾选签署留痕（版本号/时间戳/IP/设备由服务端补齐）。"""
+    """第十二/五十六/五条 + 合规文书主动勾选签署留痕（版本号/时间戳/IP/设备由服务端补齐）。"""
     doc_type: str = Field(..., pattern=CONSENT_DOC_TYPES)
     doc_version: Optional[str] = Field(None, max_length=20)
     agreed: bool = Field(True, description="实际提交的勾选值；默认不勾选由前端控制，服务端仅如实记录")
     order_id: Optional[int] = Field(None, description="支付前免责勾选关联的订单")
-    # A6：是否为「隐私授权管理」页上用户明示的重新同意。不带本标记时，privacy_policy 的
+    # 是否为「隐私授权管理」页上用户明示的重新同意。不带本标记时，privacy_policy 的
     # 同意不得覆盖已撤回的状态（见 services/consent.sign）：支付弹层的「支付即代表同意」
     # 属默示同意，不能静默抹除用户的明示撤回。
     reaffirm: bool = Field(False, description="true=用户在授权管理页上明示重新同意")
 
 
 class ConsentWithdrawRequest(BaseModel):
-    """A6（个保法第十五条）：撤回同意。只需 doc_type：时间戳/IP/设备由服务端补齐（留痕
+    """个保法第十五条：撤回同意。只需 doc_type：时间戳/IP/设备由服务端补齐（留痕
     不能交给客户端自述，否则可伪造）。可撤回范围由 services/consent.CONSENT_ITEMS 控制，
     不在这里再写一份白名单。"""
     doc_type: str = Field(..., pattern=CONSENT_DOC_TYPES)
@@ -400,7 +400,7 @@ class AdminViolationRequest(BaseModel):
     order_id: Optional[int] = Field(None, description="涉违规订单（扣该订单佣金）")
     evidence: Optional[Dict[str, Any]] = None
     report_ticket_id: Optional[int] = Field(None, description="关联举报工单")
-    operate_password: Optional[str] = Field(None, max_length=64, description="N20 敏感操作二次密码")
+    operate_password: Optional[str] = Field(None, max_length=64, description="敏感操作二次密码")
 
     @field_validator("evidence")
     @classmethod
@@ -413,28 +413,28 @@ class AdminViolationRequest(BaseModel):
 class AdminUnfreezeRequest(BaseModel):
     """中度冻结解冻：force=True 为运营强制恢复（涉嫌违法核实无误/申诉成功）。"""
     force: bool = Field(False)
-    operate_password: Optional[str] = Field(None, max_length=64, description="N20 敏感操作二次密码")
+    operate_password: Optional[str] = Field(None, max_length=64, description="敏感操作二次密码")
 
 
 class AdminLinkRequest(BaseModel):
     """第五十条/五十八条：断链（停用专属链接与二维码）或恢复。reenable=True 为恢复。"""
     reenable: bool = Field(False)
     reason: str = Field(..., min_length=1, max_length=500)
-    operate_password: Optional[str] = Field(None, max_length=64, description="N20 敏感操作二次密码")
+    operate_password: Optional[str] = Field(None, max_length=64, description="敏感操作二次密码")
 
 
 class AdminReportHandleRequest(BaseModel):
     """第五十八条：举报工单处置。respond首次响应(0->1)/handle已处置(->2)/reject驳回(->3)。"""
     action: str = Field(..., pattern="^(respond|handle|reject)$")
     handle_result: Optional[str] = Field(None, max_length=500)
-    operate_password: Optional[str] = Field(None, max_length=64, description="N20 敏感操作二次密码")
+    operate_password: Optional[str] = Field(None, max_length=64, description="敏感操作二次密码")
 
 
 class AdminExternalReviewRequest(BaseModel):
     """第五十条：外部账号报备审核。status 1=通过/2=拒绝。"""
     status: int = Field(..., ge=1, le=2)
     remark: Optional[str] = Field(None, max_length=200)
-    operate_password: Optional[str] = Field(None, max_length=64, description="N20 敏感操作二次密码")
+    operate_password: Optional[str] = Field(None, max_length=64, description="敏感操作二次密码")
 
 
 class AdminSensitiveWordRequest(BaseModel):
@@ -443,7 +443,7 @@ class AdminSensitiveWordRequest(BaseModel):
     level: int = Field(2, ge=1, le=2)
     category: Optional[str] = Field(None, max_length=50)
     enabled: int = Field(1, ge=0, le=1)
-    operate_password: Optional[str] = Field(None, max_length=64, description="N20 敏感操作二次密码")
+    operate_password: Optional[str] = Field(None, max_length=64, description="敏感操作二次密码")
 
 
 class AdminExamQuestionRequest(BaseModel):
@@ -457,7 +457,7 @@ class AdminExamQuestionRequest(BaseModel):
     score: int = Field(10, ge=1, le=100)
     sort_order: int = Field(0, ge=0)
     enabled: int = Field(1, ge=0, le=1)
-    operate_password: Optional[str] = Field(None, max_length=64, description="N20 敏感操作二次密码")
+    operate_password: Optional[str] = Field(None, max_length=64, description="敏感操作二次密码")
 
     @field_validator("options")
     @classmethod
@@ -474,42 +474,42 @@ class AdminExamQuestionRequest(BaseModel):
 class AdminRankSettleRequest(BaseModel):
     """第二十九条：手动触发月度结算（次月8号 cron 之外的补结算）。month 缺省为上一自然月。"""
     month: Optional[str] = Field(None, pattern=r"^\d{4}-\d{2}$", description="YYYY-MM，缺省=上月")
-    operate_password: Optional[str] = Field(None, max_length=64, description="N20 敏感操作二次密码")
+    operate_password: Optional[str] = Field(None, max_length=64, description="敏感操作二次密码")
 
 
-# ===== A3：渠道对账差错台账 =====
+# ===== 渠道对账差错台账 =====
 class AdminReconcileResolveRequest(BaseModel):
-    """A3：对账差错人工处置。resolved=1 标记已处理（必须填写处置说明），=0 撤销标记。
+    """对账差错人工处置。resolved=1 标记已处理（必须填写处置说明），=0 撤销标记。
 
     对账只发现不改账，差错的消除必须留下「谁、何时、怎么处理的」，否则事后无法回答
     「这笔资金差异到底平了没」——所以标记已处理时 note 必填。"""
     resolved: int = Field(..., ge=0, le=1)
     note: Optional[str] = Field(None, max_length=200, description="处置说明，标记已处理时必填")
-    operate_password: Optional[str] = Field(None, max_length=64, description="N20 敏感操作二次密码")
+    operate_password: Optional[str] = Field(None, max_length=64, description="敏感操作二次密码")
 
 
 class AdminReconcileRunRequest(BaseModel):
-    """A3：手动触发对账（每日 cron 之外的补跑）。bill_date 缺省=回溯 RECONCILE_LOOKBACK_DAYS 天。
+    """手动触发对账（每日 cron 之外的补跑）。bill_date 缺省=回溯 RECONCILE_LOOKBACK_DAYS 天。
 
     补跑是幂等的：差错以 diff_key 唯一约束入库，重对同一天不会产生重复行。"""
     bill_date: Optional[str] = Field(None, pattern=r"^\d{4}-\d{2}-\d{2}$",
                                      description="YYYY-MM-DD，指定则只对该单日补跑")
-    operate_password: Optional[str] = Field(None, max_length=64, description="N20 敏感操作二次密码")
+    operate_password: Optional[str] = Field(None, max_length=64, description="敏感操作二次密码")
 
 
-# ===== A6：敏感字段加密运维 =====
+# ===== 敏感字段加密运维 =====
 class AdminCryptoBackfillRequest(BaseModel):
-    """A6：把存量的明文敏感字段（提现实名/收款人姓名/收款账号）补加密。
+    """把存量的明文敏感字段（提现实名/收款人姓名/收款账号）补加密。
 
     幂等：已带 enc:v1: 前缀的行跳过，重复调用不会双重加密。limit 限本次处理行数，
     分次跑完而不是一次扫全库：单次请求跑十分钟会撞上网关超时，而且把整库收款账号
     一次读进内存本身就是敏感信息的一次大面积暴露。"""
     limit: Optional[int] = Field(2000, ge=1, le=20000, description="本次最多处理的行数")
-    operate_password: Optional[str] = Field(None, max_length=64, description="N20 敏感操作二次密码")
+    operate_password: Optional[str] = Field(None, max_length=64, description="敏感操作二次密码")
 
 
 class AdminAlertTestRequest(BaseModel):
-    """B2：向已配置的告警通道发一条测试消息。
+    """向已配置的告警通道发一条测试消息。
 
     为何必须有这个入口：webhook 配错（复制时少了字符、钉钉安全设置选了关键词却没填
     「运行告警」、机器人被移出群）在配置那一刻不会报任何错，要等到真出故障时才发现
@@ -517,11 +517,11 @@ class AdminAlertTestRequest(BaseModel):
     走二次密码：这是唯一能从管理端向平台之外的第三方群发消息的出口，与普通只读
     查询不同级；同时记审计日志，谁在什么时候发过测试消息可追溯。"""
     note: Optional[str] = Field(None, max_length=100, description="随测试消息附带的备注（如「上线前验证」）")
-    operate_password: Optional[str] = Field(None, max_length=64, description="N20 敏感操作二次密码")
+    operate_password: Optional[str] = Field(None, max_length=64, description="敏感操作二次密码")
 
 
 class InvoiceApplyRequest(BaseModel):
-    """B1：电子发票申请。
+    """电子发票申请。
 
     故意不收 amount 与 product_name：开票金额必须等于订单实付，两者一律从订单快照取
     （见 services/invoice.order_block）。前端能传金额就等于能开出金额不实的发票，
@@ -537,7 +537,7 @@ class InvoiceApplyRequest(BaseModel):
 
 
 class AdminInvoiceIssueRequest(BaseModel):
-    """B1：后台回填开具结果（人工在税局系统开完票后登记）。
+    """后台回填开具结果（人工在税局系统开完票后登记）。
 
     发票号码必填：台账上没有号码的「已开具」等于没开，事后无法向税务证明这张票存在。
     走二次密码 + 审计日志：写入的是对外具备法律效力的凭证信息。"""
@@ -545,18 +545,18 @@ class AdminInvoiceIssueRequest(BaseModel):
     invoice_code: Optional[str] = Field(None, max_length=30, description="发票代码（数电票可空）")
     delivery: str = Field("email", description="交付方式 email/link/offline")
     invoice_file: Optional[str] = Field(None, max_length=500, description="版式文件地址（PDF/OFD）")
-    operate_password: Optional[str] = Field(None, max_length=64, description="N20 敏感操作二次密码")
+    operate_password: Optional[str] = Field(None, max_length=64, description="敏感操作二次密码")
 
 
 class AdminInvoiceRejectRequest(BaseModel):
-    """B1：驳回开票申请。理由必填：用户有权知道为何不开，
+    """驳回开票申请。理由必填：用户有权知道为何不开，
     无理由驳回在用户看来与拒开发票没有区别（而拒开是《发票管理办法》第三十五条的罚则情形）。"""
     reason: str = Field(..., min_length=2, max_length=200, description="驳回理由（必填）")
-    operate_password: Optional[str] = Field(None, max_length=64, description="N20 敏感操作二次密码")
+    operate_password: Optional[str] = Field(None, max_length=64, description="敏感操作二次密码")
 
 
 class AdminComplianceAssessmentRequest(BaseModel):
-    """A7：追加一条合规评估记录与意见（风险项的书面评估留存）。
+    """追加一条合规评估记录与意见（风险项的书面评估留存）。
 
     只追加、不改旧行：评估记录是证据，可编辑的证据没有证据价值——事后把「已整改」
     改成「一直合规」，就再也无法证明当时发现了什么、怎么改的。复核即新写一行，
@@ -564,7 +564,7 @@ class AdminComplianceAssessmentRequest(BaseModel):
 
     measures 与 opinion 必填：只写「结论=已整改」而不写措施与理由，等于没有意见——
     行政检查要看的正是「依据什么得出这个结论」。"""
-    risk_item: str = Field(..., min_length=1, max_length=20, description="风险清单编号，如 A7")
+    risk_item: str = Field(..., min_length=1, max_length=20, description="风险清单编号，由运营方自定义")
     topic: str = Field(..., min_length=1, max_length=100, description="评估主题")
     scope_desc: Optional[str] = Field(None, max_length=2000, description="评估范围")
     legal_basis: Optional[str] = Field(None, max_length=300, description="法律依据条款")
@@ -577,7 +577,7 @@ class AdminComplianceAssessmentRequest(BaseModel):
     next_review_at: Optional[str] = Field(None, pattern=r"^\d{4}-\d{2}-\d{2}$",
                                           description="下次复核日 YYYY-MM-DD")
     evidence: Optional[Dict[str, Any]] = None
-    operate_password: Optional[str] = Field(None, max_length=64, description="N20 敏感操作二次密码")
+    operate_password: Optional[str] = Field(None, max_length=64, description="敏感操作二次密码")
 
     @field_validator("risk_item", "topic")
     @classmethod
@@ -621,7 +621,7 @@ class AdminComplianceAssessmentRequest(BaseModel):
         return v
 
 
-# ===== 用户（L7：nickname 与数据库 VARCHAR(50) 对齐）=====
+# ===== 用户（nickname 与数据库 VARCHAR(50) 对齐）=====
 class UserUpdateRequest(BaseModel):
     nickname: Optional[str] = Field(None, max_length=50)
     avatar_url: Optional[str] = Field(None, max_length=500)

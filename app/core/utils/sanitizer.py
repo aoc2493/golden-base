@@ -30,7 +30,7 @@ _SENSITIVE_KEY_NAMES = re.compile(
 )
 
 # 敏感字段名 + 值（key=value / key: value 形式）
-# 【安全审计修复 M1】原正则只匹配关键词本身、不捕获等号后的值：
+# 原正则只匹配关键词本身、不捕获等号后的值：
 # 对 "password=hunter2" 匹配到的只有 "password"，替换结果是
 # "password=******=hunter2"——真实口令原样保留，脱敏形同虚设。
 # 现在把「关键词 + 分隔符 + 值」整体捕获替换，值不再外泄。

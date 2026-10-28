@@ -18,7 +18,7 @@ async def membership_status(user: User = Depends(get_current_user),
                             db: AsyncSession = Depends(get_db)):
     """查询当前会员状态（档位/到期时间/剩余额度）。
 
-    T1：前端契约要求 data.membership 包裹状态对象
+    前端契约要求 data.membership 包裹状态对象
     （page-logic.js 三处均以 ms.membership.level / is_vip / in_grace 读取）。
     原实现裸返回状态字典，data.membership 恒为 undefined，
     会员中心据此误判「状态获取失败」并把购买入口整段隐藏——会员永远买不了。

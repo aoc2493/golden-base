@@ -131,7 +131,7 @@ async def sync_bonus_used(db: AsyncSession, user_id: int,
     """把 bonus_used 落库（= min(本周期 period_used, bonus_quota)），供会员卡片展示「赠送额度剩余」。
     赠送次数不计入退款扣费（第四十八条第2款），故需单独记录已用赠送量。
 
-    L4 接线：此前本函数是死代码——旧签名要调用方传 level/period_start/period_end，且末尾用到的
+    此前本函数是死代码——旧签名要调用方传 level/period_start/period_end，且末尾用到的
     get_membership 在本模块没有模块级导入（顶部只导了 get_member_status/quota_conf），一被调用即抛
     NameError，全库因此零调用点，user_memberships.bonus_used 恒为 0，用户用完赠送次数仍显示满额。
     现改为自算周期窗口（不再要求调用方传 period），get_membership/period_window 沿用 consume 的
@@ -256,7 +256,7 @@ async def charge_member_view(db: AsyncSession, user: User, sku_view: str, biz_ke
             logger.info("会员额度用尽(轻工具)，拒绝调用计费接口 user_id=%s order_id=%s reason=%s",
                         user.id, order.id, reason)
             return None, reason
-        # L4：本单已 completed（上方 status="completed" + flush）且在额度临界区内，惰性回填
+        # 本单已 completed（上方 status="completed" + flush）且在额度临界区内，惰性回填
         # bonus_used 供会员卡片展示「赠送额度剩余」。失败只告警不影响放行——bonus_used 仅展示用，
         # 额度判定走 consume 的实时 usage()，与此列无关。
         # 用 SAVEPOINT 隔离：回填内含多次读查询，万一失败只回滚到 SAVEPOINT，绝不污染外层事务

@@ -12,7 +12,7 @@ NON_PROD_ENVS = ("development", "dev", "testing", "test", "demo", "local")
 
 
 class Settings(BaseSettings):
-    """应用配置，从环境变量读取（v7：补全限流/时区/管理二次验证等配置）"""
+    """应用配置，从环境变量读取（限流/时区/管理二次验证等）。"""
     # 服务
     APP_HOST: str = "0.0.0.0"
     APP_PORT: int = 8000
@@ -20,9 +20,9 @@ class Settings(BaseSettings):
     # 应用展示名：用于告警消息等对外文案的署名。通用底座不预设任何产品名，
     # 部署方应配置成自己的主体名称（否则告警来源会显示成中性的「应用」）。
     APP_NAME: str = "Golden Base"
-    # 时区：统一东八区，避免 datetime.now() 取到容器 UTC（T1）
+    # 时区：统一东八区，避免 datetime.now() 取到容器 UTC
     APP_TIMEZONE: str = "Asia/Shanghai"
-    # 允许的前端来源（逗号分隔）；生产环境必须显式配置，一律不得放行 *（H5）
+    # 允许的前端来源（逗号分隔）；生产环境必须显式配置，一律不得放行 *
     CORS_ORIGINS: str = ""
     # 是否信任反向代理头（X-Real-IP / X-Forwarded-For）。
     # 默认 false：直连部署时这两个头完全由客户端控制，无条件信任会让
@@ -66,17 +66,17 @@ class Settings(BaseSettings):
     # 走限流的接口拖成“假死”。设小值后连接失败被快速抛出，交由 redis_rate_limit 的降级逻辑
     # （REDIS_FAIL_CLOSED）立即放行，请求不再卡住。生产 Redis 同机房毫秒级可达，2 秒足够宽裕。
     REDIS_SOCKET_TIMEOUT: float = 2.0
-    # M2：Redis 故障降级策略。True=故障时拒绝放行（fail-closed：限流直接拦截、token 黑名单
+    # Redis 故障降级策略。True=故障时拒绝放行（fail-closed：限流直接拦截、token 黑名单
     # 直接拒绝，代价是 Redis 宕机期间限流/黑名单转为整体不可用）；
     # False=故障时降级放行（保可用，代价是限流/注销黑名单在故障窗口内失效）。
-    # 属主决策（本次）：安全优先，默认 True。注意「Redis 从未配置」（redis_client=None，
+    # 安全优先，默认 True。注意「Redis 从未配置」（redis_client=None，
     # 如 sqlite 轻量/开发模式）不属于故障：各调用点对 None 单独放行，不受本开关影响。
     # 管理端令牌爆破锁定另有进程内计数双通道兜底，不受本开关影响。
     REDIS_FAIL_CLOSED: bool = True
-    # M4：JWT httpOnly Cookie 的 SameSite 属性。同源部署（nginx 托管前后端）默认 lax 即可；
+    # JWT httpOnly Cookie 的 SameSite 属性。同源部署（nginx 托管前后端）默认 lax 即可；
     # 仅当跨域部署（前端域名 ≠ API 域名）时必须置 none（且必须 HTTPS，否则浏览器丢弃 Secure Cookie）。
     AUTH_COOKIE_SAMESITE: str = "lax"
-    # P2（代理头信任加固）：反代 → 后端的共享密钥。配置后 get_client_ip 额外要求
+    # 代理头信任加固：反代 → 后端的共享密钥。配置后 get_client_ip 额外要求
     # 请求头 X-Proxy-Auth 与之匹配才信任 X-Real-IP/XFF（防止同机进程直连 127.0.0.1:8000
     # 伪造 IP 绕过限流/爆破锁定）。需在宿主 nginx 的 /api 反代段加：
     #   proxy_set_header X-Proxy-Auth "同值";
@@ -99,17 +99,17 @@ class Settings(BaseSettings):
     # 判断过本部署的处置」，确认后仍以 ERROR 级逐条留痕（不静默），但不再拦启动。
     # 非生产环境不受此约束——本地/演示链路必须能直接起。
     COMPLIANCE_DECISIONS_ACK: bool = False
-    # JWT（H1：默认空值 fail-closed，任何环境未显式配置都会被启动自检拦截，不再放行已知默认密钥）
+    # JWT（默认空值 fail-closed，任何环境未显式配置都会被启动自检拦截，不再放行已知默认密钥）
     JWT_SECRET_KEY: str = ""
     JWT_ALGORITHM: str = "HS256"
     JWT_EXPIRE_DAYS: int = 7
-    # M2（审计修复）：JWT 颁发/校验双重收紧，加 aud/iss 防止跨服务令牌混淆。
+    # JWT 颁发/校验双重收紧，加 aud/iss 防止跨服务令牌混淆。
     # 长度给默认值不构成漏洞：仅校验 token 携带的 aud/iss 等于这两个常量。
     # 通用底座使用中性标识。注意：存量部署若未在 .env 显式配置，
     # 升级后新签发的令牌 aud/iss 会变化，旧令牌将校验失败（需重新登录）。
     JWT_AUDIENCE: str = "app-web"
     JWT_ISSUER: str = "app-backend"
-    # A6：敏感字段（提现实名/收款人姓名/收款账号）落库加密密钥，见 utils/crypto_field.py。
+    # 敏感字段（提现实名/收款人姓名/收款账号）落库加密密钥，见 utils/crypto_field.py。
     # 与 JWT 同一哲学：fail-closed，未配置或仍用占位值一律阻断启动。密钥一旦上线不得更换：
     # 换了之后已入库的密文全部解不开（收款账号再也读不出来，打款链路断）。
     # 生成：openssl rand -hex 32（四个 worker 必须共用同一把，不得进程内自生）。
@@ -169,7 +169,7 @@ class Settings(BaseSettings):
     RESULT_CACHE_DAYS: int = 30
     ORDER_TIMEOUT_MINUTES: int = 30
     REFUND_DAYS: int = 7
-    # ===== A2 支付主动查单 / 掉单补偿 =====
+    # ===== 支付主动查单 / 掉单补偿 =====
     # 履约原本只有一条路径：等平台异步回调。回调会因网络闪断、发布重启、平台重试耗尽而
     # 全部丢失，此时用户已扣款而订单永久停在 pending/expired（掉单）。以下为拉取式兜底参数。
     PAY_QUERY_ENABLED: bool = True             # 总开关（渠道未配置时自动跳过，不报错）
@@ -178,14 +178,14 @@ class Settings(BaseSettings):
     PAY_QUERY_EXPIRED_WINDOW_HOURS: int = 48   # expired 订单的补偿窗口：回调全丢时用户其实已付款，_mark_order_paid 允许 expired→completed
     PAY_QUERY_BATCH_SIZE: int = 50             # 单轮最多查多少笔，防止把渠道查单接口打出限流
     PAY_STATUS_QUERY_COOLDOWN: int = 10        # 前端轮询 pay-status 触发查单的冷却秒数（同一订单，Redis SETNX）
-    # ===== A3 每日渠道对账 =====
+    # ===== 每日渠道对账 =====
     # 对账是资金系统的最后一道防线：回调与查单都可能漏，只有拿渠道账单逐笔轧账，才能发现
     # 「渠道已收款而本地无单/状态不符/金额不符」与「渠道已退款而本地未回收权益」。
     RECONCILE_ENABLED: bool = True
     RECONCILE_HOUR: int = 10                   # 微信次日 09:00 生成前一日账单，官方建议 10:00 后拉取
     RECONCILE_LOOKBACK_DAYS: int = 3           # 每轮回溯天数（补跑漏账）；微信账单仅可下载 3 个月内
     RECONCILE_BILL_TYPE: str = "ALL"           # 微信账单类型：ALL 含当日支付成功单与发起成功的退款单
-    # ===== A4 AI 生成合成内容标识 =====
+    # ===== AI 生成合成内容标识 =====
     # 依据《人工智能生成合成内容标识办法》（2025-09-01 施行）与 GB 45438-2025：
     # 大模型产出的内容必须同时具备三项——① 显式标识（界面可感知的「AI 生成」提示）；
     # ② 隐式标识（随内容的元数据：内容属性/服务提供者名称或编码/内容编号）；③ 生成日志
@@ -197,7 +197,7 @@ class Settings(BaseSettings):
     AI_MARK_PROVIDER_CODE: str = ""              # 服务提供者编码：上线前填统一社会信用代码；留空则用下方域名派生
     AI_MARK_SITE_CODE: str = ""                  # 编码留空时的派生源，建议填 ICP 备案主体域名标识
     AI_MARK_RETENTION_DAYS: int = 400            # 生成日志留存天数：法规下限 180 天，留余量应对追溯与诉讼
-    # ===== B2 告警通道（企业微信 / 钉钉群机器人） =====
+    # ===== 告警通道（企业微信 / 钉钉群机器人） =====
     # 全库已有大量 logger.error 形式的告警留痕（[退款告警]/[计佣告警]/[掉单补偿告警]/对账差错/启动自检），
     # 但没有任何一条会主动推给人：日志躺在容器 stdout 里，没人看就等于没发生。
     # 资金类故障的发现时延直接等于资损金额，故必须把已有 ERROR 接到即时通道上。
@@ -223,7 +223,7 @@ class Settings(BaseSettings):
     # 所以它能验到的就是真故障时能不能发出去）。
     ALERT_HEARTBEAT_ENABLED: bool = True
     ALERT_HEARTBEAT_HOUR: int = 9              # 每日几点发（整点，东八区）
-    # ===== B1 电子发票（申请登记 + 开具台账） =====
+    # ===== 电子发票（申请登记 + 开具台账） =====
     # 《发票管理办法》第十九条：收取款项应当向付款方开具发票。用户索取发票是法定权利，
     # 所以入口默认开启；真要临时停（如税控盘更换期间）也必须在页面上说明并给客服路径，
     # 静默关掉等于拒开（第三十五条对应当开具而未开具的设了罚则）。
@@ -242,7 +242,7 @@ class Settings(BaseSettings):
     # 因此这个开关从未生效。要控制插件商品的播种请在插件的 seed_data 内自行判定，
     # 别改本键——改 true/false 都不改变任何行为。
     SEED_VERTICAL_PRODUCTS: bool = False
-    # M3①（第五十六条第3款）：支付前免责勾选的服务端闸门开关。
+    # 第五十六条第3款：支付前免责勾选的服务端闸门开关。
     # 此前 DOC_PAYMENT_DISCLAIMER 只由前端写留痕、下单路径不校验（不勾也能付款）。
     # 置 True 后 order.create 在年龄门槛之后调用 distribution_compliance.has_signed
     # 校验用户是否已签署支付免责，未签即拒单。
@@ -277,7 +277,7 @@ class Settings(BaseSettings):
     # ===== 分销（对齐《分销规则 V1.4》：一级直推 + 三级等级 + 月度阶梯 + 排行榜 + 业绩为主晋升 + 90天归因）=====
     # 规则文档按部署主体各自公示，底座不绑定任何产品名。
     DISTRIBUTION_ENABLED: bool = True
-    # A7：V1.3→V1.4 只改一件事——晋升依据由「人数唯一维度」改为「业绩为主、人数为辅」。
+    # V1.3→V1.4 只改一件事——晋升依据由「人数唯一维度」改为「业绩为主、人数为辅」。
     # 版本号必须跟着口径一起升：文案变了而版本号没变，就无法向监管证明「哪一版规则在何时公示过」，
     # 也无法用 rule_change 留痕区分用户确认的是旧口径还是新口径。
     DISTRIBUTION_RULE_VERSION: str = "V1.4"
@@ -290,7 +290,7 @@ class Settings(BaseSettings):
     DIST_LEVEL_NAME: dict = {0: "普通推广员", 1: "高级推广员", 2: "合伙人"}
     DIST_LEVEL_BADGE: dict = {0: "青铜", 1: "白银", 2: "黄金"}
     DIST_COMMISSION_CAP: float = 0.60        # 第十五条：单笔佣金比例上限（合伙人 50% + 月度阶梯最高 10%）
-    # --- 晋升门槛（第十六、十七条）：A7 整改——业绩为主、人数为辅，两者同时达标才晋升 ---
+    # --- 晋升门槛（第十六、十七条）：业绩为主、人数为辅，两者同时达标才晋升 ---
     # 原口径「唯一维度=验证付费用户数，不考核推广金额」正落在《禁止传销条例》第七条第(二)项
     # 「以发展人员的数量为依据计算和给付报酬」的表述上：等级决定费率，等级只看人数，等于费率
     # 由拉人数量决定——即便单笔佣金按订单实付计算，晋升结构本身已构成「人头」导向。
@@ -320,7 +320,7 @@ class Settings(BaseSettings):
     # --- 提现风控（第三十条）：每自然日最多 2 次，00:00 重置；非推广员原因失败返还当次次数 ---
     WITHDRAW_DAILY_LIMIT: int = 2
     # --- 合规入门考试（第七条）：满分 100、80 及格、不限次数 ---
-    # 运营决策（本次）：合规考试先停用——DIST_EXAM_ENABLED=False 时不作为计佣/解冻门禁、前端不再提示，
+    # 运营决策：合规考试先停用——DIST_EXAM_ENABLED=False 时不作为计佣/解冻门禁、前端不再提示，
     # 题库/记录/端点保留闲置；将来置 True 即恢复第七条“未通过不予推广资格”硬门禁。
     DIST_EXAM_ENABLED: bool = False
     DIST_EXAM_PASS_SCORE: int = 80
@@ -335,11 +335,11 @@ class Settings(BaseSettings):
     DIST_CONSENT_RETENTION_YEARS: int = 3
     # 管理后台
     ADMIN_TOKEN: str = "change-me-admin-token"
-    # 管理后台敏感操作二次密码（N20，留空则不强制，生产强烈建议配置）
+    # 管理后台敏感操作二次密码（留空则不强制，生产强烈建议配置）
     ADMIN_OPERATE_PASSWORD: str = ""
     # 管理后台允许的来源 IP 白名单（逗号分隔，留空不限制；生产建议配置办公 IP）
     ADMIN_IP_WHITELIST: str = ""
-    # ===== v7 限流配置（M12 计费接口限流 / H1 管理接口防爆破 / N13 防重复下单）=====
+    # ===== 限流配置（计费接口 / 管理接口防爆破 / 防重复下单）=====
     RATE_LIMIT_ADMIN_FAIL_LOCK: int = 5        # 管理令牌连续失败 N 次锁定
     RATE_LIMIT_ADMIN_LOCK_SECONDS: int = 1800  # 锁定时长（秒）
     RATE_LIMIT_ORDER_PER_MIN: int = 10         # 每用户每分钟下单次数
@@ -352,7 +352,7 @@ class Settings(BaseSettings):
     # 正常用户一次支付/建档最多触发两三次勾选，10 次/分钟已远超真实用量。
     RATE_LIMIT_CONSENT_PER_MIN: int = 10       # 每用户每分钟合规留痕写入次数
     RATE_LIMIT_TOUCH_PER_HOUR: int = 60        # 每 IP 每小时推广触达上报次数（公开端点，防刷表）
-    # ===== V-5 第三方计费接口全局限流 =====
+    # ===== 第三方计费接口全局限流 =====
     # 用户级限流可被「注册大量账号」的多账号放大器绕过（每账号都拿到自己的配额），
     # 叠加一层按 IP 的全局限流，防止一次性打爆第三方付费 API 预算。
     # 仅叠加在用户级限流之上；配合 TRUST_PROXY_HEADERS=true（nginx 反代覆写 X-Real-IP）时
@@ -361,10 +361,10 @@ class Settings(BaseSettings):
     # 现有限流都是按端点各自取 RATE_LIMIT_* 键，没有任何调用点读这个总闸。
     # 待接线说明：在计费类路由上以 f"tp:{ip}" 为键统一计数后再启用，否则别依赖它。
     RATE_LIMIT_TP_GLOBAL_PER_MIN: int = 60     # 每 IP 每分钟第三方计费接口调用总上限
-    # 会员配额不在此配置：已由 services/quota.py 的 v2 模型统一承接
+    # 会员配额不在此配置：由 services/quota.py 统一承接
     # （各能力共享周期总池 + 单能力单日上限，额度取自 membership.quota_conf(level)）。
     # 新增能力配额请改 quota_conf，不要再按功能分设同类字段。
-    # 提现个税（N10）：劳务报酬代扣，0 表示不代扣（需自行承担申报义务）
+    # 提现个税：劳务报酬代扣，0 表示不代扣（需自行承担申报义务）
     WITHDRAW_TAX_ENABLED: bool = False
     WITHDRAW_TAX_RATE: float = 0.20
 
@@ -372,7 +372,7 @@ class Settings(BaseSettings):
     def database_url(self):
         """返回 SQLAlchemy URL 对象（而非拼接串）。
 
-        【安全审计修复 P2-4】原实现用 f-string 把 DB_PASSWORD 拼进连接串，
+        原实现用 f-string 把 DB_PASSWORD 拼进连接串，
         create_engine 收到的字符串在连接失败时会原样进入异常文本/日志/APM/监控，
         等于把库密码写进每一条排障信息。改用 URL.create 后，engine.url 的默认
         repr/str 会把密码渲染为 ***（SQLAlchemy 内建掩码），连接行为完全等价
@@ -406,7 +406,7 @@ class Settings(BaseSettings):
 
         启动自检、CORS 是否允许 *、模拟支付是否放行三处必须共用本属性；
         此前各处各写一份 APP_ENV == "production"，任何一处漏改就等于留了裸奔口子。
-        审计 L7：默认按生产处理 = 拼写错误（"Product"/"Prod"/"produciton"）与未配置
+        默认按生产处理 = 拼写错误（"Product"/"Prod"/"produciton"）与未配置
         等价于 production，行为正确。但运维侧可能在 staging/test 上线时拼错而误以为
         进了非生产模式，特在此打 WARNING 提示「APP_ENV 未命中已知非生产值，将按生产处理」。
         """

@@ -3,7 +3,7 @@ from datetime import datetime
 from sqlalchemy import Column, BigInteger, String, Text, Integer, SmallInteger, DateTime, JSON, DECIMAL, func, text, Index, UniqueConstraint
 from app.core.database import Base
 
-# L25：created_at / updated_at 必须同时给 Python 端 default 与 DB 端 server_default，
+# created_at / updated_at 必须同时给 Python 端 default 与 DB 端 server_default，
 # 两者缺一不可，改动前请先读完本段。
 #
 # 只用 server_default=func.now() 时时间戳由数据库生成：SQLite 的 CURRENT_TIMESTAMP
@@ -14,7 +14,7 @@ from app.core.database import Base
 #     前端轮询到 expired 直接抛「订单已关闭」：用户付了钱却被告知订单没了，极易重复
 #     下单重复付款（支付回调仍能把 expired 激活为 completed，钱不会丢，但体验与
 #     重复扣款风险都是真实的）；
-#   · order.continue_pay —— 同一判据恒真，N6「继续支付」永远回「订单已超时，请重新下单」；
+#   · order.continue_pay —— 同一判据恒真，「继续支付」永远回「订单已超时，请重新下单」；
 #   · scheduler.auto_refund_failed_reports —— 报告刚 failed 0 秒即满足「超 10 分钟」，
 #     立刻全额退款，注释声明的重试窗口形同虚设；
 #   · 插件的报告自愈守卫 —— 刚建好的报告被判为「已卡死 8 小时」，老化限频完全失效，
@@ -39,15 +39,15 @@ class User(Base):
     nickname = Column(String(50), nullable=True)
     avatar_url = Column(String(500), nullable=True)
     status = Column(SmallInteger, default=1, comment="1正常 2已注销")
-    # A8：账号持有人自报的公历出生日期，仅用于年龄门槛（未成年人禁充值）。
+    # 账号持有人自报的公历出生日期，仅用于年龄门槛（未成年人禁充值）。
     # 存公历而不存历法类型：声明只收公历，农历自报年龄无法向监管复现。
     # 与业务档案里的 birth_date 不是一回事：后者是「解读对象」（可能是他人、可能是未成年人）。
     # 注销时随其他个人信息一并置空，声明行为本身由 compliance_consents 留痕保留。
-    declared_birth_date = Column(String(20), nullable=True, comment="A8 自报公历出生日期（年龄门槛）")
-    age_declared_at = Column(DateTime, nullable=True, comment="A8 成年声明时点")
+    declared_birth_date = Column(String(20), nullable=True, comment="自报公历出生日期（年龄门槛）")
+    age_declared_at = Column(DateTime, nullable=True, comment="成年声明时点")
     inviter_id = Column(BigInteger, nullable=True, comment="一级邀请人，仅绑定一次")
     invited_at = Column(DateTime, nullable=True)
-    # 双向定位（属主决策）：内部自增 ID 与登录标识两个维度共同钉死用户唯一性。
+    # 双向定位：内部自增 ID 与登录标识两个维度共同钉死用户唯一性。
     # 本两列记录「最近一次登录用的标识」，订单创建时快照进 orders.login_id_*，
     # 即使日后标识变更/账号合并，历史订单与开票仍能双向回溯核对。
     last_login_type = Column(String(16), nullable=True, comment="最近登录标识类型 device/oa_openid/mp_openid/unionid")
@@ -156,7 +156,7 @@ class Order(Base):
     product_type = Column(String(20), nullable=True)
     product_name = Column(String(100), nullable=False)
     amount = Column(DECIMAL(10, 2), nullable=False)
-    # v7：新增 refund_pending（退款处理中，允许重试），解决 N2 退款卡死
+    # refund_pending：退款处理中、允许重试——只有退款三态齐备才能重试，不再卡死
     status = Column(String(20), default="pending",
                     comment="pending/completed/refunded/refund_pending/expired/cancelled")
     pay_channel = Column(String(10), nullable=True)
@@ -199,7 +199,7 @@ class UserMembership(Base):
 
 
 class MembershipLedger(Base):
-    """会员发放/回滚流水（N4/M6）：每笔开通/续期/退款独立记录，退款时精确回滚对应批次"""
+    """会员发放/回滚流水：每笔开通/续期/退款独立记录，退款时精确回滚对应批次"""
     __tablename__ = "membership_ledger"
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     user_id = Column(BigInteger, nullable=False, index=True)
@@ -213,7 +213,7 @@ class MembershipLedger(Base):
 
 class UserEntitlement(Base):
     __tablename__ = "user_entitlements"
-    # P3（#33 属主决策加 DB 唯一约束）：与 init.sql 同口径，
+    # 加 DB 唯一约束：与 init.sql 同口径，
     # 同一订单同一 feature 仅一条权益，数据库层兜底幂等。
     __table_args__ = (UniqueConstraint("order_id", "feature", name="uk_order_feature"),)
     id = Column(BigInteger, primary_key=True, autoincrement=True)
@@ -221,7 +221,7 @@ class UserEntitlement(Base):
     sku_code = Column(String(40), nullable=False)
     feature = Column(String(20), nullable=False, index=True)
     status = Column(String(20), default="available", comment="available/used/expired/revoked")
-    order_id = Column(BigInteger, nullable=False, index=True)  # T9：加索引便于幂等校验
+    order_id = Column(BigInteger, nullable=False, index=True)  # 加索引便于幂等校验
     biz_key = Column(String(64), nullable=True)
     expire_at = Column(DateTime, nullable=True)
     used_at = Column(DateTime, nullable=True)
@@ -231,13 +231,13 @@ class UserEntitlement(Base):
 class Report(Base):
     __tablename__ = "reports"
     id = Column(BigInteger, primary_key=True, autoincrement=True)
-    order_id = Column(BigInteger, nullable=False, unique=True, comment="M10：一单一报告唯一约束")
+    order_id = Column(BigInteger, nullable=False, unique=True, comment="一单一报告唯一约束")
     user_id = Column(BigInteger, nullable=False)
     title = Column(String(200), nullable=True)
     chapters = Column(JSON, nullable=True)
-    # v7：新增 refunded（已退款）状态
+    # refunded：已退款终态
     status = Column(String(20), default="generating", comment="generating/completed/failed/refunded")
-    # A4：AI 生成合成内容标识元数据（见 utils/ai_mark.build_ai_meta）。
+    # AI 生成合成内容标识元数据（见 utils/ai_mark.build_ai_meta）。
     # 必须落库而不是每次响应时现算：标识是「生成时」的事实（哪次生成、哪个模型、
     # 哪几章出自大模型），事后无从复现；且历史报告在本次改动之前生成，现算会把它们
     # 一律标成当前口径，与事实不符。接口下发时由 ai_mark.label_payload 展平，
@@ -245,7 +245,7 @@ class Report(Base):
     ai_meta = Column(JSON, nullable=True)
     viewed_at = Column(DateTime, nullable=True)
     retry_count = Column(SmallInteger, default=0)
-    # v19：软删除（档案页「解读历史」隐藏）；订单/财务不受影响，收藏保留
+    # 软删除（档案页「解读历史」隐藏）；订单/财务不受影响，收藏保留
     deleted_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.now, server_default=func.now())
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now,
@@ -253,7 +253,7 @@ class Report(Base):
 
 
 class AiGenerationLog(Base):
-    """A4：生成合成内容的日志留存表（《标识办法》第十一条：不少于六个月）。
+    """生成合成内容的日志留存表（《标识办法》第十一条：不少于六个月）。
 
     存摘要而不存原文：提示词与生成内容里含用户姓名、出生信息等个人信息，原文全量留存
     400 天等于把敏感数据另存一份，与《个人信息保护法》最小必要原则冲突；而监管核查
@@ -282,12 +282,12 @@ class AiGenerationLog(Base):
 
 class Refund(Base):
     __tablename__ = "refunds"
-    # L3：refund_no 唯一（与 init.sql 的 uk_refund_no 对齐）。防退款回调重复投递/重试重复插入落多行。
+    # refund_no 唯一（与 init.sql 的 uk_refund_no 对齐）。防退款回调重复投递/重试重复插入落多行。
     __table_args__ = (UniqueConstraint("refund_no", name="uk_refund_no"),)
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     order_id = Column(BigInteger, nullable=False, index=True)
     user_id = Column(BigInteger, nullable=False)
-    refund_no = Column(String(40), nullable=True, comment="商户退款单号（N2/H3，UUID 防碰撞）")
+    refund_no = Column(String(40), nullable=True, comment="商户退款单号（UUID 防碰撞）")
     reason = Column(String(100), nullable=False)
     description = Column(String(200), nullable=True)
     status = Column(String(20), default="pending_refund",
@@ -300,7 +300,7 @@ class Refund(Base):
 
 
 class ReconciliationDiff(Base):
-    """A3：渠道对账差错台账。每日把渠道账单与本地订单/退款逐笔轧账，只记差异、不自动改账。
+    """渠道对账差错台账。每日把渠道账单与本地订单/退款逐笔轧账，只记差异、不自动改账。
 
     为何不自动平账：差异成因横跨「渠道跨日入账、退款回调丢失、金额被篡改、本地漏单、
     账单口径差异」，自动改账一旦判错方向就是真实的资金错误（多发货或少退款），风险远大于收益。
@@ -358,13 +358,13 @@ class Distributor(Base):
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     user_id = Column(BigInteger, unique=True, nullable=False, index=True)
     invite_code = Column(String(12), unique=True, nullable=False)
-    # N5：注销时改为 0 冻结而非物理删除，保留佣金流水用于对账
+    # 注销时改为 0 冻结而非物理删除，保留佣金流水用于对账
     status = Column(SmallInteger, default=1, comment="0冻结/注销 1正常 2违规封禁")
     total_commission = Column(DECIMAL(12, 2), default=0)
     pending_commission = Column(DECIMAL(12, 2), default=0)
     available_commission = Column(DECIMAL(12, 2), default=0)
     withdrawn_commission = Column(DECIMAL(12, 2), default=0)
-    # M24：已结算佣金被退款冲回、余额不足时形成的负债。只记不还——全库无自动补债逻辑，
+    # 已结算佣金被退款冲回、余额不足时形成的负债。只记不还——全库无自动补债逻辑，
     # 需人工对账追讨（后台推广员列表以「冲回欠款」展示）
     debt_commission = Column(DECIMAL(12, 2), default=0)
     invite_count = Column(Integer, default=0)
@@ -379,7 +379,7 @@ class Distributor(Base):
     level_updated_at = Column(DateTime, nullable=True, comment="最近一次等级变更时点")
     exam_passed = Column(SmallInteger, default=0, comment="是否通过合规入门考试（0未过/1已过）")
     consent_signed_at = Column(DateTime, nullable=True, comment="《合规推广承诺书》签署时点")
-    # A6：提现实名 AES-256-GCM 加密落库（见 utils/crypto_field.py）。
+    # 提现实名 AES-256-GCM 加密落库（见 utils/crypto_field.py）。
     # 列宽按「接口允许的最坏明文」实测密文长度定，而不是按字符数估：字段不限字符集，
     # 50 个汉字是 150 字节，密文 = 前缀7 + base64(nonce12 + 150 + tag16) = 247 字符。
     # 原 180 是 ASCII 口径（同 50 字符只 111 长），MySQL 严格模式会报 1406 让整个提现
@@ -399,7 +399,7 @@ class CommissionLog(Base):
     order_id = Column(BigInteger, unique=True, nullable=False)
     order_no = Column(String(32), nullable=False)
     order_amount = Column(DECIMAL(10, 2), nullable=False)
-    rate = Column(DECIMAL(5, 4), nullable=False, comment="M8：Float 改 DECIMAL 避免精度问题；V1.3=实际生效费率(base+uplift封顶后)")
+    rate = Column(DECIMAL(5, 4), nullable=False, comment="费率（DECIMAL 保证精度；V1.3=实际生效费率(base+uplift封顶后)）")
     # ===== V1.3 计佣口径快照：单笔佣金=实付×(基础费率+月度阶梯上浮)，次月8号按最终档位重算补差 =====
     base_rate = Column(DECIMAL(5, 4), nullable=True, comment="下单时等级基础费率快照(0.30/0.40/0.50)")
     uplift_rate = Column(DECIMAL(5, 4), default=0, comment="结算当时适用的月度阶梯上浮，月度重算后更新为最终值")
@@ -414,7 +414,7 @@ class CommissionLog(Base):
 
 
 class CommissionFailLog(Base):
-    """T5：计佣失败记录，定时任务重试，避免佣金静默丢失"""
+    """计佣失败记录，定时任务重试，避免佣金静默丢失"""
     __tablename__ = "commission_fail_logs"
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     order_id = Column(BigInteger, nullable=False, index=True)
@@ -434,11 +434,11 @@ class Withdrawal(Base):
     distributor_id = Column(BigInteger, nullable=False, index=True)
     user_id = Column(BigInteger, nullable=False)
     amount = Column(DECIMAL(10, 2), nullable=False, comment="提现申请总额（税前）")
-    tax_amount = Column(DECIMAL(10, 2), default=0, comment="N10：代扣个税金额")
+    tax_amount = Column(DECIMAL(10, 2), default=0, comment="代扣个税金额")
     actual_amount = Column(DECIMAL(10, 2), nullable=True, comment="税后实际打款金额")
     status = Column(String(20), default="auditing", comment="auditing/paid/rejected")
     channel = Column(String(10), nullable=False)
-    # A6：收款人姓名与账号均属敏感个人信息（账号泄露即可直接造成资金损失），
+    # 收款人姓名与账号均属敏感个人信息（账号泄露即可直接造成资金损失），
     # AES-256-GCM 加密落库；展示一律走 mask_* 脱敏，只有后台提现详情（二次密码门禁）
     # 才解密明文供打款。列宽口径同 Distributor.real_name——按接口允许的最坏明文实测
     # 密文长度（姓名 50 汉字→247，账号 100 汉字→447），不是按字符数估。
@@ -554,7 +554,7 @@ class ComplianceConsent(Base):
 
 
 class ComplianceAssessment(Base):
-    """A7：上线风险项的合规评估记录与意见留存。
+    """上线风险项的合规评估记录与意见留存。
 
     整改代码之外为什么还要单独一张表：代码只能证明「改了」，证明不了「为什么这么改、
     依据哪一条、谁在何时评估过、结论是已整改还是风险可接受」。行政检查与纠纷中被要求
@@ -563,12 +563,12 @@ class ComplianceAssessment(Base):
     存 DB 而不是仓库里的 markdown：markdown 不进数据库备份、不随库迁移，也无法在后台按
     风险项检索并展示给运营人员；而评估意见的保存期限应当不短于其所证明的业务行为留痕期。
 
-    risk_item 用清单编号（A2/A3/A7/B1…）作主检索键。同一风险项允许多次评估（复核即追加），
+    risk_item 用运营方自己的风险清单编号作主检索键。同一风险项允许多次评估（复核即追加），
     故不加唯一约束；当前有效意见以同 risk_item 下 status=1 且 id 最大的一行为准。
     """
     __tablename__ = "compliance_assessments"
     id = Column(BigInteger, primary_key=True, autoincrement=True)
-    risk_item = Column(String(20), nullable=False, index=True, comment="风险清单编号，如 A7")
+    risk_item = Column(String(20), nullable=False, index=True, comment="风险清单编号，由运营方自定义")
     topic = Column(String(100), nullable=False, comment="评估主题，如「分销晋升口径」")
     scope_desc = Column(Text, nullable=True, comment="评估范围：涉及的模块/口径/页面")
     legal_basis = Column(String(300), nullable=True, comment="法律依据条款，如《禁止传销条例》第七条第(二)项")
@@ -652,7 +652,7 @@ class ViolationRecord(Base):
 
 
 class AdminOperationLog(Base):
-    """M18：管理后台敏感操作审计日志"""
+    """管理后台敏感操作审计日志"""
     __tablename__ = "admin_operation_logs"
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     action = Column(String(50), nullable=False, comment="refund/grant_membership/audit_withdrawal 等")
@@ -664,7 +664,7 @@ class AdminOperationLog(Base):
 
 
 class InvoiceRequest(Base):
-    """B1：电子发票申请登记与开具台账。
+    """电子发票申请登记与开具台账。
 
     为何必须有：《发票管理办法》第十九条——从事经营活动的单位和个人对外发生经营业务
     收取款项，收款方应当向付款方开具发票；第三十五条对应当开具而未开具的设了罚则。
@@ -719,7 +719,7 @@ class InvoiceRequest(Base):
 
 
 # ============================================================
-# 卡券模块（渠道批发卡密）—— 接入该业务 H5 时新增
+# 卡券模块（渠道批发卡密）—— 接入该业务 H5 前端时新增
 #
 # 只新增卡券自身必需的两张表；Order / UserMembership / UserEntitlement /
 # MembershipLedger 等**一律复用本文件已有的模型**，不另定义 ——

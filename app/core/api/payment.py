@@ -11,7 +11,7 @@ _self_refund_block）拦成「无实际支付金额，无需退款」，fulfill_
   · alipay/notify   —— 支付宝异步回调（RSA2 验签→履约）。
 主动查单兜底见 services/payment_sync.py；回调与查单最终都收口到 _mark_order_paid。
 真实回调落地地址由 settings.WECHAT_NOTIFY_URL / ALIPAY_NOTIFY_URL 配置，必须分别指向上面
-两个 notify 路由（生产要求 HTTPS，见 main._startup_check 的 N9 项）。
+两个 notify 路由（生产要求 HTTPS，见 main._startup_check）。
 """
 import logging
 from datetime import datetime
@@ -149,8 +149,8 @@ async def wechat_notify(request: Request, background_tasks: BackgroundTasks,
     未配 WECHAT_PLATFORM_CERT_PATH 时一律拒收（见 utils/payment.py）。
     幂等/并发：验签后经条件 UPDATE 抢履约权，WHERE status 为非终态才翻转，
     rowcount=1 才履约、并发落败方幂等回执（见 _mark_order_paid）。"""
-    # 【安全审计 L1 + M2：DoS 加固】验签前的报文体硬上限。微信回调明文不足 10KB，64KB 已是十余倍冗余。
-    # M2：先按 Content-Length 预检——原实现 await request.body() 把整个 body 读进内存后才判大小，
+    # 验签前的报文体硬上限。微信回调明文不足 10KB，64KB 已是十余倍冗余。
+    # 先按 Content-Length 预检——原实现 await request.body() 把整个 body 读进内存后才判大小，
     # 攻击者发一个全局上限（8MB）以内、但远超 64KB 的 body 就能让回调白白缓冲整包再拒绝；预检超限
     # 直接 413，一个字节都不读。chunked 无 Content-Length 时由下方 len(body) 兜底（全局流式中间件已限 8MB）。
     _cl = request.headers.get("content-length")
@@ -164,7 +164,7 @@ async def wechat_notify(request: Request, background_tasks: BackgroundTasks,
     headers = {k.lower(): v for k, v in request.headers.items()}
     # 前置判定「凭据是否配好」。未配置时 verify_callback 一律返回 None，与「签名被篡改」
     # 无法区分：上游只看到 400、日志只有一条 WARNING，运维极易把「环境没配凭证」
-    # 误判成「正在被攻击」。故显式回 503 + ERROR（走 B2 告警通道），把两者分开。
+    # 误判成「正在被攻击」。故显式回 503 + ERROR（走告警通道），把两者分开。
     if not wechat_pay.can_verify_callback():
         logger.error("微信支付回调被拒绝：商户参数/验签凭据未配置完整，无法验签"
                      "（需 WECHAT_MCH_ID + WECHAT_API_V3_KEY，"
@@ -203,7 +203,7 @@ async def wechat_notify(request: Request, background_tasks: BackgroundTasks,
 
 
 async def _handle_wechat_refund(db: AsyncSession, result: dict) -> bool:
-    """微信退款回调（H2/H4）：据 refund_status 更新退款单与订单，成功则回收权益/冲佣。
+    """微信退款回调：据 refund_status 更新退款单与订单，成功则回收权益/冲佣。
     对应 api/order.py 中退款返回 processing 的分支——那里把订单置为 refund_pending 后，
     正是等本回调给出最终结论（SUCCESS/CLOSED/ABNORMAL）。返回 False 让微信重试。
 
@@ -255,8 +255,8 @@ async def alipay_notify(request: Request, background_tasks: BackgroundTasks,
     支付宝退款为同步返回（apply_refund 内 api_alipay_trade_refund 立即得结果），无需退款回调。
     幂等/并发：验签后经条件 UPDATE 抢履约权，WHERE status 为非终态才翻转，
     rowcount=1 才履约、并发落败方幂等回执（见 _mark_order_paid）。"""
-    # 【安全审计 L1 + M2：DoS 加固】同微信侧：支付宝回调为表单提交，正常不足 16KB，64KB 硬上限。
-    # M2：先按 Content-Length 预检，超限直接 413 不读 body（理由同微信侧）；chunked 由 len(body) 兜底。
+    # 同微信侧：支付宝回调为表单提交，正常不足 16KB，64KB 硬上限。
+    # 先按 Content-Length 预检，超限直接 413 不读 body（理由同微信侧）；chunked 由 len(body) 兜底。
     _cl = request.headers.get("content-length")
     if _cl and _cl.isdigit() and int(_cl) > 64 * 1024:
         logger.warning(f"支付宝回调 Content-Length 超限已拒绝 cl={_cl}")

@@ -1,4 +1,4 @@
-"""会员档位端到端履约回归（P0 防线）。
+"""会员档位端到端履约回归。
 
 覆盖「钱付了、会员没到」这条最贵的路径：底座 vip_* 档位能下单、能收到回调，
 但履约要经 membership.level_of_sku 反查出档位。此前该函数只认插件
@@ -124,7 +124,7 @@ async def test_duplicate_membership_callback_grants_once(db):
 async def test_startup_gate_blocks_unregistered_membership_sku(db, monkeypatch):
     """启动门禁：在售会员商品反查不到档位时，生产拒绝启动、非生产只告警、下架不拦。
 
-    这条门禁是给上面的 P0 兜底的：档位码与种子一旦再次脱钩，故障会在启动时就暴露，
+    这条门禁给上面的启动判定兜底：档位码与种子一旦再次脱钩，故障会在启动时就暴露，
     而不是等用户付了钱才发现权益没到。
     """
     from app.main import _check_membership_products, _seed_base_data

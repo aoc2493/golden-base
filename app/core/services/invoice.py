@@ -1,4 +1,4 @@
-"""B1：电子发票 —— 开票资格判定、字段校验、退款联动与台账序列化。
+"""电子发票 —— 开票资格判定、字段校验、退款联动与台账序列化。
 
 为什么单独一个 service 而不把规则写在 api/invoice.py 里：
 同一套资格判据有三个消费方——用户端的「能否开票」查询、用户端的提交申请、
@@ -244,7 +244,7 @@ def detail(inv: InvoiceRequest) -> dict:
 
 
 def user_detail(inv: InvoiceRequest) -> dict:
-    """P3 修复（用户端字段收敛）：detail() 是管理台账口径，handler（处置人账号）、
+    """用户端字段收敛：detail() 是管理台账口径，handler（处置人账号）、
     invoice_file（内部文件路径）、delivery（内部投递留痕）属运营侧信息，
     不应下发给普通用户。用户详情基于 brief + 开具结果字段，剔除内部三件套。"""
     d = detail(inv)
@@ -271,7 +271,7 @@ async def on_order_refunded(db: AsyncSession, order: Order) -> str:
       · 已开具 → 置 need_red_flush 并按 ERROR 告警。已交付的发票不会随退款自动消失，
         必须开红字发票冲销，否则平台账面收入与税局申报收入长期不符；
         红冲只能在税局系统人工操作，没有自动通道，所以必须把人叫来
-        （B2 的告警 Handler 会把这条 ERROR 推到企微/钉钉群）。
+        （告警 Handler 会把这条 ERROR 推到企微/钉钉群）。
     """
     try:
         inv = await find_by_order(db, order.id)
@@ -291,7 +291,7 @@ async def on_order_refunded(db: AsyncSession, order: Order) -> str:
         return ""
     except Exception as e:
         logger.error(f"[发票] 退款联动处理失败 order_id={order.id}: {e}", exc_info=True)
-        # 审计 M3：原始异常只入日志（已含堆栈），对外文案统一，避免泄露内部细节
+        # 原始异常只入日志（已含堆栈），对外文案统一，避免泄露内部细节
         return "发票联动处理失败，请稍后重试或联系客服"
 
 

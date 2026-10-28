@@ -1,10 +1,10 @@
 """
-管理端接口 v7（订单/会员/分销/提现/用户统一接入）
-- H1：令牌失败限流锁定 + 可选 IP 白名单，防暴力破解
-- H3：退款幂等检查，已退款/退款中订单拒绝重复退款
-- N2/H4：退款三态（成功/处理中/失败）
-- M18：所有写操作记录 admin_operation_logs
-- N20：敏感操作二次密码
+管理端接口（订单/会员/分销/提现/用户统一接入）
+- 令牌失败限流锁定 + 可选 IP 白名单，防暴力破解
+- 退款幂等检查，已退款/退款中订单拒绝重复退款
+- 退款三态（成功/处理中/失败）
+- 所有写操作记录 admin_operation_logs
+- 敏感操作二次密码
 """
 import json
 import hmac
@@ -34,15 +34,15 @@ from app.core.api.common import (AdminAuthDenied, success, error, ErrorCode, get
 from app.core.auth import redis_client
 from app.core.services.distribution import audit_withdrawal
 from app.core.services import identity as identity_svc
-# A6：实名/收款信息在库里是密文。列表页一律脱敏（mask_*），只有提现详情（二次密码
+# 实名/收款信息在库里是密文。列表页一律脱敏（mask_*），只有提现详情（二次密码
 # 门禁 + 操作日志）才用 decrypt_field(strict=True) 解出明文供人工打款。
 from app.core.utils.crypto_field import (decrypt_field, mask_name, mask_account,
                                     encrypt_field, is_encrypted)
-# B2：告警通道。后台需要两个能力——看通道到底通不通（status），以及主动验一次（test）。
+# 告警通道。后台需要两个能力——看通道到底通不通（status），以及主动验一次（test）。
 # 不在这里重写一份发送逻辑：两处各发一份就会出现「后台测试能收到、真故障时收不到」
 # 这类最难查的分叉（两边参数不一致，而测试通过会让人误以为通道没问题）。
 from app.core.utils import alert as alert_svc
-# B1：发票台账。序列化口径（brief/detail）、状态常量与开具写入都走 service，
+# 发票台账。序列化口径（brief/detail）、状态常量与开具写入都走 service，
 # 不在这里另拼一份：用户端与后台对同一行数据给出两种说法，是台账类功能最典型的失控方式。
 from app.core.services import invoice as invoice_svc
 from app.core.services import distribution_violation as dv
@@ -61,7 +61,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/admin", tags=["管理端"])
 
 
-# P3 修复（admin.py / admin_extra.py 全量接口无 Redis 限流）：admin_card.py 有 _admin_rate_limit，
+# admin.py / admin_extra.py 全量接口无 Redis 限流：admin_card.py 有 _admin_rate_limit，
 # 而 admin.py / admin_extra.py 数十个接口只靠 require_admin 的进程内错误锁定兜底——
 # token 一旦泄露即可无限速拖库（用户/订单/权益全量导出）。router 级依赖统一加
 # IP 维度限流：240 次/分钟（正常运营操作远低于此），Redis 故障时放行（与全站限流同降级口径）。
@@ -82,7 +82,7 @@ router = admin_router
 
 
 async def _log_operation(db, request, action, target_type=None, target_id=None, detail=None):
-    """M18：写管理操作审计日志"""
+    """写管理操作审计日志"""
     try:
         db.add(AdminOperationLog(
             action=action, target_type=target_type, target_id=str(target_id) if target_id else None,
@@ -92,7 +92,7 @@ async def _log_operation(db, request, action, target_type=None, target_id=None, 
         logger.error(f"审计日志写入失败: {e}")
 
 
-# Redis 不可用时的进程内失败计数兜底。H1 的爆破锁定原先完全依赖 Redis，
+# Redis 不可用时的进程内失败计数兜底。爆破锁定原先完全依赖 Redis，
 # 而本项目 Redis 异常时一律「降级放行」，Redis 一挂（本机开发环境正是如此），
 # 管理令牌就退化为可无限速暴力破解——读不到计数、也写不进计数，锁定永不触发。
 # 这里维护一份带时间窗的内存计数，与 Redis 计数取较大值判定锁定：
@@ -133,17 +133,17 @@ def _local_fail_incr(ip: str) -> int:
 
 async def require_admin(request: Request, db: AsyncSession = Depends(get_db),
                         x_admin_token: str = Header(default="")) -> bool:
-    """H1：令牌校验 + 失败计数锁定 + IP 白名单（修复：锁定后真正拒绝请求，不再继续比对令牌）
+    """令牌校验 + 失败计数锁定 + IP 白名单（锁定后真正拒绝请求，不再继续比对令牌）
     门禁审计：每次决策（拒绝/锁定/通过）落 admin_operation_logs，上线后可追溯暴力破解与异常登录。
     审计只记 IP/路径/原因/失败计数，绝不记令牌内容；写入失败不影响鉴权判定（fail-open on audit，
     _log_operation 内部已吞异常）。
 
-    上线前检查修复：失败不再以“返回 False”表达（那会让路由体以 HTTP 200 + code=6001 返回，
+    上线前检查：失败不再以“返回 False”表达（那会让路由体以 HTTP 200 + code=6001 返回，
     爆破在 nginx 日志/监控/WAF 上与正常访问无法区分），改为抛出 AdminAuthDenied，
     由 main.py 统一回 HTTP 401 + code=6001；放行/拒绝的判定条件本身未变。"""
     ip = get_client_ip(request)
     path = request.url.path
-    # H1 加固：代码默认值/空令牌在任意环境都不可用，避免 demo/测试环境
+    # 加固：代码默认值/空令牌在任意环境都不可用，避免 demo/测试环境
     # 沿用人人可得的默认令牌上线（生产已由启动自检拦截，此处补齐非生产缺口）
     if not settings.ADMIN_TOKEN or settings.ADMIN_TOKEN == "change-me-admin-token":
         await _log_operation(db, request, "admin_auth_denied", target_type="auth",
@@ -157,7 +157,7 @@ async def require_admin(request: Request, db: AsyncSession = Depends(get_db),
                              detail={"reason": "ip_not_in_whitelist", "path": path})
         raise AdminAuthDenied()
     key = f"admin_fail:{ip}"
-    # 修复：已达失败上限的 IP 在锁定期内直接拒绝，不再走令牌比对，阻断暴力破解。
+    # 已达失败上限的 IP 在锁定期内直接拒绝，不再走令牌比对，阻断暴力破解。
     # 内存计数与 Redis 计数取较大值，任一通道判定锁定即拒绝，Redis 故障时防护不再整体失效。
     cnt = _local_fail_count(ip)
     try:
@@ -208,11 +208,11 @@ CARD_CHANNEL = "card"
 
 
 async def _check_operate_password(req, db: AsyncSession):
-    """N20：敏感操作的二次密码校验（fail-closed）。返回错误信息或 None。
+    """敏感操作的二次密码校验（fail-closed）。返回错误信息或 None。
     密码源优先读库中 PBKDF2 哈希（控制台可随时修改），未设置时回落 .env；
     校验统一走 credential 的常量时间比较，避免时序侧信道。
 
-    【M-1 修复】原实现「未配置则不强制」（fail-open）：退款、提现打款确认、改会员
+    原实现「未配置则不强制」（fail-open）：退款、提现打款确认、改会员
     等资金/资产类操作在运维漏配操作密码时，全部退化为仅凭登录令牌即可执行——
     防护强度反而低于卡券模块（admin_card._operate_password_error 同场景是
     fail-closed）。现对齐卡券口径：未配置即拒绝并给出配置路径，堵住
@@ -234,7 +234,7 @@ def _like_escape(value: str) -> str:
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 def _mask_phone(p):
     """手机号脱敏（管理端列表页）：11 位手机号保留前 3 后 4。
-    【审计 P2：隐私最小化】列表接口可分页遍历全站用户，明文下发手机号等于给
+    列表接口可分页遍历全站用户，明文下发手机号等于给
     管理令牌附赠一个「全量手机号导出」接口；运营需要完整号码联系用户时走
     用户详情页（单用户、有明确业务场景），与提现账号「列表脱敏/详情门禁」同口径。
     非 11 位（历史脏数据/座机）统一只留前 2 位，短值直接全遮，宁过度不泄露。"""
@@ -320,7 +320,7 @@ async def dashboard(db: AsyncSession = Depends(get_db), is_admin: bool = Depends
         select(func.coalesce(func.count(Withdrawal.id), 0)).where(Withdrawal.status == "auditing"))).scalar() or 0
     pending_commission = (await db.execute(
         select(func.coalesce(func.sum(CommissionLog.amount), 0)).where(CommissionLog.status == "pending"))).scalar() or 0
-    # T6：退款失败数（需人工介入）
+    # 退款失败数（需人工介入）
     refund_failed = (await db.execute(
         select(func.coalesce(func.count(Refund.id), 0)).where(Refund.status == "failed"))).scalar() or 0
     # 退款处理中数（渠道已受理、结论未回）。与退款失败同属「不知道就等于没处理」的待办：
@@ -329,15 +329,15 @@ async def dashboard(db: AsyncSession = Depends(get_db), is_admin: bool = Depends
     refund_processing = (await db.execute(
         select(func.coalesce(func.count(Refund.id), 0)).where(
             Refund.status.in_(["processing", "pending_refund"])))).scalar() or 0
-    # A3：未处理对账差错数。与退款失败同属「不处理就是资损」的待办，必须在概览页曝光：
+    # 未处理对账差错数。与退款失败同属「不处理就是资损」的待办，必须在概览页曝光：
     # 对账每日自动跑，差错只入库不改账，没人看就等于没对。
     recon_unresolved = (await db.execute(
         select(func.coalesce(func.count(ReconciliationDiff.id), 0)).where(
             ReconciliationDiff.resolved == 0))).scalar() or 0
-    # B1：待开具与待红冲条数。与待审提现、未处理对账差错同属「不处理就出事」的待办队列：
+    # 待开具与待红冲条数。与待审提现、未处理对账差错同属「不处理就出事」的待办队列：
     # 开票申请不报错也不告警，只会默默超期，而超期不开属《发票管理办法》第三十五条
     # 的罚则情形；待红冲则意味着平台账面收入与税局申报收入不符。不上概览就等于没人会看。
-    # 包 try 而不直接查：存量 MySQL 库如果还没执行 v15 脚本，这里会抛 Table doesn't exist，
+    # 包 try 而不直接查：存量 MySQL 库如果还没建 invoice_requests 表，这里会抛 Table doesn't exist，
     # 不拦住就会让整张概览页白屏——为一张可选表而牺牲收入/订单这些必需指标不划算。
     # 取不到时下发 None，前端据此不渲染该卡片（而不是渲染一个假的 0，
     # 0 会让人误以为「没有待开票」，与「表还没建」是两回事）。
@@ -345,7 +345,7 @@ async def dashboard(db: AsyncSession = Depends(get_db), is_admin: bool = Depends
         inv_counts = await _invoice_counts(db)
         invoice_pending, invoice_red = inv_counts["pending_total"], inv_counts["red_flush_total"]
     except Exception as e:
-        logger.warning(f"[发票] 概览计数读取失败（多为 invoice_requests 表未建，请执行 v15 脚本）: {e}")
+        logger.warning(f"[发票] 概览计数读取失败（多为 invoice_requests 表未建，请补执行 sql/migrations/ 增量脚本）: {e}")
         invoice_pending, invoice_red = None, None
     return success({
         "user_total": user_total, "order_total": order_total, "paid_total": paid_total,
@@ -383,7 +383,7 @@ async def admin_orders(status_filter: str = Query(None, alias="status"), sku: st
         stmt = stmt.where(Order.sku_code == sku)
     if keyword:
         kw = keyword.strip()
-        # L4：订单号优先前缀匹配走索引，用户ID精确匹配
+        # 订单号优先前缀匹配走索引，用户ID精确匹配
         # isascii 守卫：str.isdigit() 对上标字符（"²"）也返回 True，但 int("²") 抛
         # ValueError → 未捕获 500；限定 ASCII 数字后该分支的 int() 恒安全。
         if kw.isascii() and kw.isdigit():
@@ -413,7 +413,7 @@ async def admin_order_detail(order_id: int, db: AsyncSession = Depends(get_db),
     if not order:
         return error(ErrorCode.ORDER_INVALID, "订单不存在")
     refunds = (await db.execute(select(Refund).where(Refund.order_id == order_id))).scalars().all()
-    # L18：ensure-report 曾把 biz_data 以 json.dumps 后的字符串写入 JSON 列（见 L17），
+    # ensure-report 曾把 biz_data 以 json.dumps 后的字符串写入 JSON 列，
     # 存量行 ORM 读回来是 str，后台详情会显示成一坨转义文本，客服无法核对出生信息。
     # 仅做展示层兼容：本来就是 None、或解析失败的保持原样，不改变字段语义。
     biz_view = order.biz_data
@@ -452,7 +452,7 @@ async def admin_refund(order_id: int, req: AdminRefundRequest, request: Request,
     order = (await db.execute(row_lock(select(Order).where(Order.id == order_id)))).scalar_one_or_none()
     if not order:
         return error(ErrorCode.ORDER_INVALID, "订单不存在")
-    # H3：退款幂等——已有成功/处理中的退款则拒绝
+    # 退款幂等——已有成功/处理中的退款则拒绝
     exist = (await db.execute(select(Refund).where(
         Refund.order_id == order_id,
         Refund.status.in_(["refunded", "processing", "pending_refund"])))).scalars().first()
@@ -468,7 +468,7 @@ async def admin_refund(order_id: int, req: AdminRefundRequest, request: Request,
     if (order.pay_channel or "") == CARD_CHANNEL:
         return error(ErrorCode.REFUND_NOT_ELIGIBLE,
                      "卡券兑换订单不支持退款，请通过卡券作废流程处理")
-    # L23：卡券单之外，还有一类同样「无真实资金流入」的订单能通过上面的状态校验——
+    # 卡券单之外，还有一类同样「无真实资金流入」的订单能通过上面的状态校验——
     # 会员期内 ensure-report 产生的 0 元解读单（pay_channel='member', amount=0），
     # 状态恒为 completed。对它退款同样只会命中一笔 0 元退款：模拟支付模式下
     # apply_refund 直接判成功，revoke_refunded_order 随即撤销该会员刚拿到的免费权益，
@@ -501,7 +501,7 @@ async def admin_refund(order_id: int, req: AdminRefundRequest, request: Request,
                 .values(status="refund_pending"))).rowcount
             if not claimed:
                 return error(ErrorCode.REFUND_NOT_ELIGIBLE, "该订单已在退款流程中，请勿重复操作")
-        # V-2：退款单号入库即预生成并原样传给平台。此前 apply_refund 内部临时生成——
+        # 退款单号入库即预生成并原样传给平台。此前 apply_refund 内部临时生成——
         # 进程在拿到结果前崩溃会把空单号留在 Refund 行，retry_failed_refunds 重试时
         # 会再生成新单号向平台发起第二笔真实退款；预生成后重试复用同一 out_refund_no，
         # 微信/支付宝对重复单号幂等返回，杜绝“同订单二次真实退款”。
@@ -510,7 +510,7 @@ async def admin_refund(order_id: int, req: AdminRefundRequest, request: Request,
                         description=req.remark, status="pending_refund", refund_no=refund_no)
         db.add(refund)
         await db.flush()
-        # 【安全审计修复 M6】与用户端 /api/order/refund 同口径：退款单与订单抢占
+        # 与用户端 /api/order/refund 同口径：退款单与订单抢占
         # 状态先持久化再调渠道。否则「渠道已受理 → 本地事务回滚」的窗口内，
         # 再次发起退款会生成新 refund_no 向平台退第二笔真钱。
         await db.commit()
@@ -593,13 +593,13 @@ async def admin_user_detail(user_id: int, request: Request, db: AsyncSession = D
     user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
     if not user:
         return error(ErrorCode.NO_PERMISSION, "用户不存在")
-    # 【L2 修复】详情页明文下发手机号与全部登录标识（列表已脱敏），与提现/发票的
+    # 详情页明文下发手机号与全部登录标识（列表已脱敏），与提现/发票的
     # 「明文查看必留痕」原则对齐补一条审计：谁在何时看过谁的明文个人信息必须可追溯。
     # 详情本身不设操作密码门禁——核对场景高频，二次密码会显著拖慢客服响应，
     # 留痕已满足「事后可查」的最小要求（收紧为门禁属运营策略决策，不在代码层强制）。
     await _log_operation(db, request, "user_view_detail", "user", user_id,
                          {"fields": "phone,identities"})
-    member = await get_member_status(db, user_id)  # M7：统一走实时状态
+    member = await get_member_status(db, user_id)  # 统一走实时状态
     dist = (await db.execute(select(Distributor).where(Distributor.user_id == user_id))).scalar_one_or_none()
     order_cnt = (await db.execute(
         select(func.coalesce(func.count(Order.id), 0)).where(Order.user_id == user_id))).scalar() or 0
@@ -678,7 +678,7 @@ async def admin_distributors(page: int = Query(1, ge=1), page_size: int = Query(
         "verified_paid_count": int(d.verified_paid_count or 0),
         "exam_passed": bool(int(d.exam_passed or 0)),
         "link_disabled": bool(int(d.link_disabled or 0)),
-        # A6：原先是 d.real_name[0] + "**"。加密后 real_name 是 enc:v1:… 开头的密文，
+        # 原先是 d.real_name[0] + "**"。加密后 real_name 是 enc:v1:… 开头的密文，
         # 取首字会得到固定的 "e**"——既没脱敏出任何有用信息，还让运营看不出“到底绑没绑
         # 实名”（风控要靠它判断）。mask_name 先解密再脱敏，且兼容存量明文行。
         "real_name_mask": (mask_name(d.real_name) or None),
@@ -831,7 +831,7 @@ async def admin_withdrawals(status_filter: str = Query("auditing", alias="status
         "id": x.id, "withdraw_no": x.withdraw_no, "user_id": x.user_id,
         "amount": float(x.amount), "tax_amount": float(x.tax_amount or 0),
         "actual_amount": float(x.actual_amount) if x.actual_amount is not None else None,
-        # A6：列表页不过二次密码，姓名同样只给脱敏值（原先直接下发明文姓名）。
+        # 列表页不过二次密码，姓名同样只给脱敏值（原先直接下发明文姓名）。
         "status": x.status, "channel": x.channel, "account_name": mask_name(x.account_name),
         "account_mask": mask_account(x.channel, x.account_no),
         "remark": x.remark,
@@ -846,17 +846,17 @@ async def admin_withdrawal_detail(withdrawal_id: int, request: Request,
                                   db: AsyncSession = Depends(get_db),
                                   is_admin: bool = Depends(require_admin),
                                   x_operate_password: str = Header(default="", alias="X-Operate-Password")):
-    """提现单详情：完整收款账号属敏感信息，配置了操作密码时必须携带二次密码（N20 口径）"""
+    """提现单详情：完整收款账号属敏感信息，配置了操作密码时必须携带二次密码（与后台其他敏感操作同口径）"""
     if not is_admin:
         return error(ErrorCode.ADMIN_LOCKED, "管理令牌无效或已被锁定")
-    # 【审计 P1：凭据双源统一】原先只校验 .env 的 ADMIN_OPERATE_PASSWORD，与
+    # 原先只校验 .env 的 ADMIN_OPERATE_PASSWORD，与
     # credential 服务「控制台改密后只认库中 PBKDF2 哈希、.env 旧值立即失效」的
     # 设计相悖：管理员经 /credentials/update 改过操作密码后，本接口仍认 .env
     # 旧值——改密前已泄露/移交的旧密码对「查看完整收款账号」永远有效；更糟的
     # 是 .env 未配而库里已设置时，条件短路直接跳过门禁，任何持有管理令牌者
     # 都能拉到解密后的实名+完整收款账号。改与 admin_audit/_check_operate_password
     # 同口径：库哈希优先、回落 .env，只要任一来源配置了就必须校验通过。
-    # 【M-1 修复】未配置操作密码时同样拒绝（fail-closed，与 _check_operate_password
+    # 未配置操作密码时同样拒绝（fail-closed，与 _check_operate_password
     # 新口径一致）：本接口解密下发实名+完整收款账号，fail-open 等于「忘了配密码 →
     # 任何持有管理令牌者都能拉到打款要用的全部要素」。
     if not await credential_svc.operate_password_configured(db):
@@ -869,7 +869,7 @@ async def admin_withdrawal_detail(withdrawal_id: int, request: Request,
     if not wd:
         return error(ErrorCode.PARAM_ERROR, "提现单不存在")
     await _log_operation(db, request, "withdraw_view_account", "withdrawal", withdrawal_id)
-    # A6：解密明文供人工打款。strict=True——解不开（密钥被换过或密文被篡改）时必须报错，
+    # 解密明文供人工打款。strict=True——解不开（密钥被换过或密文被篡改）时必须报错，
     # 绝不能把密文或空串当成收款账号交给运营去打款（钱会打到不存在的账号上）。
     # 同时不能抛 500：密钥问题是运维配置事故，要让后台看到可读原因而不是白屏。
     try:
@@ -908,7 +908,7 @@ async def admin_audit(withdrawal_id: int, req: AdminAuditRequest, request: Reque
     return success(msg=msg)
 
 
-# ==================== A6：敏感字段加密运维 ====================
+# ==================== 敏感字段加密运维 ====================
 # 密文前缀的 LIKE 匹配串（用于「还是明文」的筛选）。前缀里没有 _ 与 % 通配符，
 # 不需转义；若将来改了前缀格式，这里必须同步（见 utils/crypto_field._PREFIX）。
 _ENC_PREFIX_LIKE = "enc:v1:%"
@@ -918,7 +918,7 @@ _ENC_PREFIX_LIKE = "enc:v1:%"
 async def admin_crypto_backfill(req: AdminCryptoBackfillRequest, request: Request,
                                 db: AsyncSession = Depends(get_db),
                                 is_admin: bool = Depends(require_admin)):
-    """A6：把存量的明文敏感字段补加密（幂等，可反复调用直到 remaining 全为 0）。
+    """把存量的明文敏感字段补加密（幂等，可反复调用直到 remaining 全为 0）。
 
     为什么必须有这个入口：字段加密只对「新写入」生效，本次改动之前入库的收款账号仍是
     明文，不补加密就不能声称「库里已无明文敏感字段」。做成管理端接口而不是一次性脚本：
@@ -1254,7 +1254,7 @@ async def admin_upsert_exam_question(req: AdminExamQuestionRequest, request: Req
     return success({"id": q.id}, msg="已保存")
 
 
-# ==================== A3：渠道对账差错台账 ====================
+# ==================== 渠道对账差错台账 ====================
 # 对账只发现不改账，本组接口就是「人工处置」的那一端：看差错、标已处理、补跑对账。
 @router.get("/reconcile/diffs")
 async def admin_reconcile_diffs(bill_date: str = Query("", description="YYYY-MM-DD，空=全部"),
@@ -1268,7 +1268,7 @@ async def admin_reconcile_diffs(bill_date: str = Query("", description="YYYY-MM-
                                 page_size: int = Query(20, ge=1, le=100),
                                 db: AsyncSession = Depends(get_db),
                                 is_admin: bool = Depends(require_admin)):
-    """A3：对账差错列表。未处理的排在前面，并附全局未处理计数与对账链路健康位。
+    """对账差错列表。未处理的排在前面，并附全局未处理计数与对账链路健康位。
 
     健康位（enabled/channels）是必需的：差错为空既可能是「账平了」也可能是「对账根本没在跑」
     （模拟支付开关未关、渠道未配置），不给这两个标志会让管理员把后者误读成前者。"""
@@ -1328,7 +1328,7 @@ async def admin_reconcile_diffs(bill_date: str = Query("", description="YYYY-MM-
 async def admin_reconcile_resolve(diff_id: int, req: AdminReconcileResolveRequest, request: Request,
                                   db: AsyncSession = Depends(get_db),
                                   is_admin: bool = Depends(require_admin)):
-    """A3：标记差错已处理（或撤销标记）。处置说明必填且进审计日志：
+    """标记差错已处理（或撤销标记）。处置说明必填且进审计日志：
     对账不改账，意味着每一笔差异都是人工平的，事后必须能回答「谁、何时、怎么平的」。"""
     if not is_admin:
         return error(ErrorCode.ADMIN_LOCKED, "管理令牌无效或已被锁定")
@@ -1358,7 +1358,7 @@ async def admin_reconcile_resolve(diff_id: int, req: AdminReconcileResolveReques
 async def admin_reconcile_run(req: AdminReconcileRunRequest, request: Request,
                               db: AsyncSession = Depends(get_db),
                               is_admin: bool = Depends(require_admin)):
-    """A3：手动补跑对账。传 bill_date 只对该单日，不传则按 RECONCILE_LOOKBACK_DAYS 回溯。
+    """手动补跑对账。传 bill_date 只对该单日，不传则按 RECONCILE_LOOKBACK_DAYS 回溯。
 
     互斥锁只为避开与每日 cron 重叠时的重复账单拉取（渠道对账单接口有频控）；
     对账本身幂等，即使锁失效并发跑也不会产生重复差错行或重复履约。
@@ -1397,7 +1397,7 @@ async def admin_reconcile_run(req: AdminReconcileRunRequest, request: Request,
     return success(result, msg="对账完成")
 
 
-# ==================== A7：合规评估记录与意见留存 ====================
+# ==================== 合规评估记录与意见留存 ====================
 # 整改代码只能证明「改了」，本组接口对应的是「为什么这么改、依据哪一条、谁负责、
 # 何时复核」——行政检查与纠纷中被要求出示的正是后者。
 _CONCLUSION_TEXT = {"rectified": "已整改", "acceptable": "风险可接受",
@@ -1428,7 +1428,7 @@ async def admin_compliance_assessments(risk_item: str = Query("", max_length=20,
                                        page_size: int = Query(20, ge=1, le=100),
                                        db: AsyncSession = Depends(get_db),
                                        is_admin: bool = Depends(require_admin)):
-    """A7：评估记录列表。按风险项编号升序、同编号内新记录在前（追加式台账的阅读顺序）。
+    """评估记录列表。按风险项编号升序、同编号内新记录在前（追加式台账的阅读顺序）。
 
     附带 overdue_review（已过下次复核时点的有效记录数）：它是这张表唯一需要「催办」的信号。
     评估过期而未复核，等于该风险项处于无人负责状态，比「没有评估记录」更难被发现。"""
@@ -1461,7 +1461,7 @@ async def admin_compliance_assessments(risk_item: str = Query("", max_length=20,
 async def admin_compliance_assessment_detail(assessment_id: int,
                                              db: AsyncSession = Depends(get_db),
                                              is_admin: bool = Depends(require_admin)):
-    """A7：评估记录全文（发现/措施/意见/佐证）。只读，不需二次密码：
+    """评估记录全文（发现/措施/意见/佐证）。只读，不需二次密码：
     内容不含个人信息与资金信息，就是平台自己写的合规意见，卡住它只会让运营不愿意查。"""
     if not is_admin:
         return error(ErrorCode.ADMIN_LOCKED, "管理令牌无效或已被锁定")
@@ -1480,7 +1480,7 @@ async def admin_compliance_assessment_detail(assessment_id: int,
 async def admin_compliance_assessment_create(req: AdminComplianceAssessmentRequest, request: Request,
                                              db: AsyncSession = Depends(get_db),
                                              is_admin: bool = Depends(require_admin)):
-    """A7：追加一条评估记录。
+    """追加一条评估记录。
 
     只 INSERT、永不 UPDATE 旧行：可编辑的证据没有证据价值。复核就新写一行，同一 risk_item
     下以 id 最大的有效行为当前意见。本接口也因此不需要「删除/作废」入口：作废同样是改写历史，
@@ -1515,7 +1515,7 @@ async def admin_compliance_assessment_create(req: AdminComplianceAssessmentReque
 
 @router.get("/alert/status")
 async def admin_alert_status(is_admin: bool = Depends(require_admin)):
-    """B2：告警通道状态与运行统计（已接入哪些通道、触发级别、去重窗口、
+    """告警通道状态与运行统计（已接入哪些通道、触发级别、去重窗口、
     本周期收到/推送/抑制/失败各多少条）。
 
     只读、不需二次密码：不含个人信息与资金信息，webhook 也只回显末 8 位
@@ -1531,7 +1531,7 @@ async def admin_alert_status(is_admin: bool = Depends(require_admin)):
 async def admin_alert_test(req: AdminAlertTestRequest, request: Request,
                            db: AsyncSession = Depends(get_db),
                            is_admin: bool = Depends(require_admin)):
-    """B2：发一条测试告警，验证通道真的能收到。
+    """发一条测试告警，验证通道真的能收到。
 
     force=True 绕开去重：测试消息的去重键每次都一样，不 force 就会被自己上一次的窗口
     抑制，运维点了没反应，无从判断是 webhook 配错还是被去重了。
@@ -1566,7 +1566,7 @@ async def admin_alert_test(req: AdminAlertTestRequest, request: Request,
     return success(res, msg=f"测试消息已发送至 {'/'.join(res.get('channels') or [])}")
 
 
-# ==================== B1：电子发票开具台账 ====================
+# ==================== 电子发票开具台账 ====================
 # 本项目不做自动开票（对接税控/服务商需纳税人资质与合同），这一组接口就是
 # 「人工在税局系统开完票后回填」的那一端。台账的唯一价值是可追溯：
 # 谁在何时申请了什么、平台何时开的、开的是哪一张、驳回理由是什么，缺一不可。
@@ -1588,7 +1588,7 @@ async def _invoice_counts(db: AsyncSession) -> dict:
 @router.get("/invoices/summary")
 async def admin_invoice_summary(db: AsyncSession = Depends(get_db),
                                 is_admin: bool = Depends(require_admin)):
-    """B1：台账概览（概览页与发票 tab 头部共用）。只读、不需二次密码：只有计数，无个人信息。"""
+    """台账概览（概览页与发票 tab 头部共用）。只读、不需二次密码：只有计数，无个人信息。"""
     if not is_admin:
         return error(ErrorCode.ADMIN_LOCKED, "管理令牌无效或已被锁定")
     data = await _invoice_counts(db)
@@ -1608,9 +1608,9 @@ async def admin_invoices(status: str = Query("all", description="all/pending/iss
                          page_size: int = Query(20, ge=1, le=100),
                          db: AsyncSession = Depends(get_db),
                          is_admin: bool = Depends(require_admin)):
-    """B1：开票申请列表。待开具的排在前面——那是唯一有时间压力的部分。
+    """开票申请列表。待开具的排在前面——那是唯一有时间压力的部分。
 
-    邮箱在列表一律脱敏（与 A6 提现列表同一口径）：财务在列表阶段只需分辨是谁申请的，
+    邮箱在列表一律脱敏（与提现列表同一口径）：财务在列表阶段只需分辨是谁申请的，
     真正要把票发出去时走详情接口（二次密码门禁 + 审计），列表页不必摊开几十个人的邮箱。
     """
     if not is_admin:
@@ -1636,7 +1636,7 @@ async def admin_invoices(status: str = Query("all", description="all/pending/iss
         stmt.order_by((InvoiceRequest.status == invoice_svc.ST_PENDING).desc(),
                       InvoiceRequest.created_at.desc(), InvoiceRequest.id.desc())
             .offset((page - 1) * page_size).limit(page_size))).scalars().all()
-    # 【L3 修复】抬头/税号与邮箱同口径脱敏：个人抬头即真实姓名、税号可能是身份证号，
+    # 抬头/税号与邮箱同口径脱敏：个人抬头即真实姓名、税号可能是身份证号，
     # 列表可分页遍历全部申请；完整抬头/税号走详情接口（操作密码门禁 + 审计）。
     data = {"list": [invoice_svc.brief(r, mask_email=True, mask_pii=True) for r in rows],
             "total": total, "page": page, "page_size": page_size}
@@ -1649,13 +1649,13 @@ async def admin_invoice_detail(invoice_id: int, request: Request,
                               db: AsyncSession = Depends(get_db),
                               is_admin: bool = Depends(require_admin),
                               x_operate_password: str = Header(default="", alias="X-Operate-Password")):
-    """B1：申请详情。邮箱明文属个人信息，配置了操作密码时必须携带二次密码（N20 口径，
+    """申请详情。邮箱明文属个人信息，配置了操作密码时必须携带二次密码（同一口径，
     与提现详情完全一致）并写审计：把票发到哪个邮箱是可被冒用的动作，必须留痕。"""
     if not is_admin:
         return error(ErrorCode.ADMIN_LOCKED, "管理令牌无效或已被锁定")
-    # P1 修复（密码双源不一致）：原实现直接比对 .env 明文，绕过 credential_svc 的
+    # 密码双源不一致：原实现直接比对 .env 明文，绕过 credential_svc 的
     # 「库中 PBKDF2 哈希优先」口径——管理员在控制台改密后，旧 .env 密码对本接口
-    # 永远有效。现与 _check_operate_password 同源，且改为 fail-closed（M-1）：
+    # 永远有效。现与 _check_operate_password 同源，且改为 fail-closed：
     # 未配置操作密码时同样拒绝——本接口明文下发抬头/税号/邮箱，均为可被冒用的
     # 个人信息，门禁不能因「忘了配密码」而失效。
     if not await credential_svc.operate_password_configured(db):
@@ -1688,7 +1688,7 @@ async def admin_invoice_detail(invoice_id: int, request: Request,
 async def admin_invoice_issue(invoice_id: int, req: AdminInvoiceIssueRequest, request: Request,
                              db: AsyncSession = Depends(get_db),
                              is_admin: bool = Depends(require_admin)):
-    """B1：回填开具结果。写入的是对外具备法律效力的凭证信息，故走二次密码 + 审计日志。"""
+    """回填开具结果。写入的是对外具备法律效力的凭证信息，故走二次密码 + 审计日志。"""
     if not is_admin:
         return error(ErrorCode.ADMIN_LOCKED, "管理令牌无效或已被锁定")
     pw_err = await _check_operate_password(req, db)
@@ -1701,7 +1701,7 @@ async def admin_invoice_issue(invoice_id: int, req: AdminInvoiceIssueRequest, re
     if inv.need_red_flush:
         # 这条申请对应的订单已经退款（退款钩子置的位）。此时开票就是为不存在的交易
         # 开具发票，属虚开；而标记没自动改成 cancelled 说明钩子当时失败了。
-        # 硬拦 + 按 ERROR 告警（B2 的 Handler 会推到人），不能只回一句「状态不对」。
+        # 硬拦 + 按 ERROR 告警（Handler 会推到人），不能只回一句「状态不对」。
         logger.error(f"[发票告警] 开具被拦：申请待红冲但订单已退款，退款联动可能已失败 "
                      f"apply_no={inv.apply_no} order={inv.order_no} status={inv.status}")
         return error(ErrorCode.INVOICE_NOT_ELIGIBLE,
@@ -1740,7 +1740,7 @@ async def admin_invoice_issue(invoice_id: int, req: AdminInvoiceIssueRequest, re
                           "amount": str(inv.amount), "invoice_no": invoice_no,
                           "invoice_code": req.invoice_code, "delivery": req.delivery})
     logger.info(f"[发票] 已回填开具结果 apply_no={inv.apply_no} invoice_no={invoice_no}")
-    # 【L4 修复】响应改用脱敏 brief：原 detail() 会回传明文邮箱/抬头/税号，
+    # 响应改用脱敏 brief：原 detail() 会回传明文邮箱/抬头/税号，
     # 叠加「操作密码未配置」的旧 fail-open 时等于绕过详情接口门禁拿明文。
     # 前端登记成功后仅 toast + 刷新列表，不消费 detail 字段。
     return success({"id": inv.id,
@@ -1752,7 +1752,7 @@ async def admin_invoice_issue(invoice_id: int, req: AdminInvoiceIssueRequest, re
 async def admin_invoice_reject(invoice_id: int, req: AdminInvoiceRejectRequest, request: Request,
                               db: AsyncSession = Depends(get_db),
                               is_admin: bool = Depends(require_admin)):
-    """B1：驳回申请。理由必填并原样展示给用户。
+    """驳回申请。理由必填并原样展示给用户。
 
     驳回不等于拒开：驳回后用户可改正抬头/税号重新提交（复用同一行）。
     但若理由含糊（「不符合条件」），用户看不出该改什么，就只能反复提交或去 12366 投诉，
@@ -1779,7 +1779,7 @@ async def admin_invoice_reject(invoice_id: int, req: AdminInvoiceRejectRequest, 
                          {"apply_no": inv.apply_no, "order_no": inv.order_no,
                           "amount": str(inv.amount), "reason": reason})
     logger.info(f"[发票] 申请已驳回 apply_no={inv.apply_no} reason={reason}")
-    # 【L4 修复】同 issue：响应改用脱敏 brief，不回传明文个人信息。
+    # 与 issue 接口同口径：响应改用脱敏 brief，不回传明文个人信息。
     return success({"id": inv.id,
                     "detail": invoice_svc.brief(inv, mask_email=True, mask_pii=True)},
                    msg="已驳回，用户可修改后重新提交")

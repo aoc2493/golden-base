@@ -57,7 +57,7 @@ async def update_user_info(req: UserUpdateRequest, db: AsyncSession = Depends(ge
     warned = False
     if req.nickname is not None:
         nickname = req.nickname.strip()[:50]
-        # M3③（第五十七/五十八条）：昵称是对他人可见的 UGC，落库前过敏感词。
+        # 第五十七/五十八条：昵称是对他人可见的 UGC，落库前过敏感词。
         # 一级拦截词 blocked → 拒绝改名（CONTENT_VIOLATION）；二级预警词 warned → 放行但回文字提示。
         sw = await compliance_svc.check_sensitive(db, nickname)
         if sw["blocked"]:
@@ -74,7 +74,7 @@ async def update_user_info(req: UserUpdateRequest, db: AsyncSession = Depends(ge
                    msg="昵称含疑似违规内容，请注意规范用词" if warned else "success")
 
 
-# ==================== A6：隐私授权管理（个保法第十五条：便捷的撤回同意方式） ====================
+# ==================== 隐私授权管理（个保法第十五条：便捷的撤回同意方式） ====================
 @router.get("/consents")
 async def list_consents(db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)):
     """我的授权清单：每项授权的当前状态、用途、能否撤回与撤回后果。
@@ -107,7 +107,7 @@ async def sign_consent(req: ConsentSignRequest, request: Request,
     limited = await _consent_write_guard(request, user)
     if limited:
         return limited
-    # P2 修复（证据表防伪造）：
+    # 证据表防伪造：
     # ① doc_version 不采信客户端自报——伪造高版本号会污染 latest_agreed_version 的
     #    版本比对语义（留痕表按版本号判定生效状态），一律服务端写入当前生效版本；
     # ② order_id 必须归属当前用户，防止把同意留痕挂到他人订单上破坏证据链。
@@ -146,8 +146,8 @@ async def withdraw_consent(req: ConsentWithdrawRequest, request: Request,
     return success({"doc_type": req.doc_type, "agreed": False, "effect": msg}, msg="已撤回同意")
 
 
-# ==================== A8：年龄门槛与未成年人保护 ====================
-# 2026-09-11 平台属主决策：成年声明/他人出生信息告知两道门槛前后端一起关闭，
+# ==================== 年龄门槛与未成年人保护 ====================
+# 成年声明 / 他人出生信息告知两道门槛前后端一起关闭，
 # /age-gate 与 /age-declaration 两个接口随之下架（前端已无任何调用点）；
 # services/minor_guard.gate_payer / gate_bio 恒放行，下单/计算/建档链路不再拦截。
 
@@ -156,7 +156,7 @@ async def withdraw_consent(req: ConsentWithdrawRequest, request: Request,
 async def delete_account(credentials: HTTPAuthorizationCredentials = Depends(security),
                          db: AsyncSession = Depends(get_db),
                          user: User = Depends(get_current_user)):
-    """注销账号：N5 推广员改冻结而非物理删除，保证佣金流水可对账/可冲回"""
+    """注销账号：推广员改冻结而非物理删除，保证佣金流水可对账/可冲回"""
     user_id = user.id
     dist = (await db.execute(select(Distributor).where(Distributor.user_id == user_id))).scalar_one_or_none()
     if dist:
@@ -165,7 +165,7 @@ async def delete_account(credentials: HTTPAuthorizationCredentials = Depends(sec
         # 必须用 scalars().first()：withdrawals 在 (user_id, status) 上没有任何唯一约束，
         # 同一用户存在两笔 auditing 是可能的（apply_withdrawal 修复前的并发穿透就造成过
         # 这种脏数据）。scalar_one_or_none() 命中多行会抛 MultipleResultsFound，
-        # 注销接口从此永久 500 —— 用户再也无法注销账号（与 L6 同一类缺陷）。
+        # 注销接口从此永久 500 —— 用户再也无法注销账号（同类缺陷）。
         wd = (await db.execute(select(Withdrawal).where(
             Withdrawal.user_id == user_id, Withdrawal.status == "auditing"))).scalars().first()
         if wd:
@@ -182,7 +182,7 @@ async def delete_account(credentials: HTTPAuthorizationCredentials = Depends(sec
     # 订单/退款为财务凭证不删除，仅清空出生信息隐私
     await db.execute(Order.__table__.update().where(Order.user_id == user_id)
                      .values(input_snapshot=None, result_ref_id=None, biz_data=None))
-    # N5：推广员冻结（status=0）而非物理删除，保留佣金流水用于对账与退款冲回
+    # 推广员冻结（status=0）而非物理删除，保留佣金流水用于对账与退款冲回
     if dist:
         dist.status = 0
     # 身份标识归档，释放唯一约束
@@ -208,12 +208,12 @@ async def delete_account(credentials: HTTPAuthorizationCredentials = Depends(sec
     # 订单上的快照列也不清（它和 order_no/amount 一样是财务凭证的一部分）。
     user.last_login_type = None
     user.last_login_value = None
-    # A8：自报出生日期属个人信息，注销时随其他个人信息一并置空。
+    # 自报出生日期属个人信息，注销时随其他个人信息一并置空。
     # 「该账号曾在 T 时点完成过成年声明、文本版本为 V」这件事由 compliance_consents 留痕保留
     # （法定留痕不得删），监管要看的是平台履行了门槛义务，而不是那个具体日期。
     user.declared_birth_date = None
     user.age_declared_at = None
-    # M1/N19：当前 token 拉黑 + 用户级全设备拉黑
+    # 当前 token 拉黑 + 用户级全设备拉黑
     if credentials:
         try:
             payload = decode_jwt_token(credentials.credentials)
@@ -229,7 +229,7 @@ async def delete_account(credentials: HTTPAuthorizationCredentials = Depends(sec
             # 拉黑失败（如 Redis 不可用）不阻断注销本身，但绝不能静默：
             # 否则令牌在自然过期前仍有效，安全事件无从排查
             logger.warning("注销拉黑令牌失败 user_id=%s", user_id, exc_info=True)
-    # M4：注销同时清除 httpOnly Cookie 会话
+    # 注销同时清除 httpOnly Cookie 会话
     resp = JSONResponse(content=success())
     clear_auth_cookie(resp)
     return resp

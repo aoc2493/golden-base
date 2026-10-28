@@ -61,7 +61,7 @@ REDIS_PASSWORD=<强密码>
   逐条留痕。可选的处置：
   `ENFORCE_PAYMENT_DISCLAIMER=true`（支付前免责勾选的服务端校验，需前端先接签署 UI）、
   `WITHDRAW_TAX_ENABLED=true`（佣金提现代扣个税，税率见 `WITHDRAW_TAX_RATE`）。
-- 年龄门槛（成年声明 / 监护人同意）已按属主决策于 2026-09-11 关闭，`minor_guard` 恒放行；
+- 年龄门槛（成年声明 / 监护人同意）在本底座里恒放行（`minor_guard` 不做拦截）；
   这条决定不在 `.env` 里（刻意不做成开关：法定义务做成配置项，一次改动就能静默关掉且不留痕），
   重新打开要改 `app/core/services/minor_guard.py` 的 `gate_payer` / `gate_bio`，
   判据（周岁推算、农历换算、留痕）都已实现并有测试。若业务可能触达未成年人，

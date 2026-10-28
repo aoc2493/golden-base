@@ -1,8 +1,8 @@
 """
-支付平台封装（v7）
-- 微信支付 V3：H5/JSAPI 下单、回调验签解密、退款（解析 refund_status，H4）
+支付平台封装
+- 微信支付 V3：H5/JSAPI 下单、回调验签解密、退款（解析 refund_status）
 - 支付宝：手机网站支付 wap、回调验签、退款
-- 退款单号 UUID 防碰撞（M4-单号/H3），金额全程 Decimal（T7）
+- 退款单号使用 UUID 防碰撞，金额全程 Decimal
 """
 import asyncio
 import httpx
@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 
 class RefundResult:
-    """退款结果（N2/H4）：success 成功 / processing 处理中 / failed 失败"""
+    """退款结果：success 成功 / processing 处理中 / failed 失败"""
     def __init__(self, status: str, refund_no: str = "", raw: dict = None, msg: str = ""):
         self.status = status              # success / processing / failed
         self.refund_no = refund_no
@@ -40,7 +40,7 @@ class RefundResult:
 
 
 def gen_refund_no() -> str:
-    """H3/M4：退款单号使用 UUID，彻底避免时间戳取模碰撞"""
+    """退款单号使用 UUID，彻底避免时间戳取模碰撞"""
     return "RF" + uuid.uuid4().hex[:24].upper()
 
 
@@ -54,14 +54,14 @@ REFUND_STATUS_MAP = {'SUCCESS': 'success', 'PROCESSING': 'processing',
 class PaymentService:
     @staticmethod
     def generate_order_no() -> str:
-        """L1：BZ + 年月日时分秒 + 6 位密码学随机数，降低同秒碰撞概率"""
+        """BZ + 年月日时分秒 + 6 位密码学随机数，降低同秒碰撞概率"""
         timestamp = time.strftime("%Y%m%d%H%M%S")
         rand = str(secrets.randbelow(900000) + 100000)  # 6 位
         return f"BZ{timestamp}{rand}"
 
 
 def _fen(amount) -> int:
-    """元转分，Decimal 精确计算（T7）"""
+    """元转分，Decimal 精确计算"""
     d = Decimal(str(amount)).quantize(Decimal("0.01"))
     return int((d * 100).to_integral_value())
 
@@ -164,7 +164,7 @@ class WechatPayService(PaymentService):
         return None
 
     async def create_jsapi_order(self, order_no, amount, description, openid):
-        """N22：下单 appid 必须与 openid 归属一致（服务号 AppID 与支付 AppID 需相同）"""
+        """下单 appid 必须与 openid 归属一致（服务号 AppID 与支付 AppID 需相同）"""
         if not self.is_configured():
             logger.warning("微信支付未完成配置，无法下单")
             return None
@@ -212,7 +212,7 @@ class WechatPayService(PaymentService):
         }
 
     def verify_callback(self, headers: dict, body: bytes):
-        """验证微信支付 V3 回调，返回支付结果或退款结果（H2：区分事件类型）"""
+        """验证微信支付 V3 回调，返回支付结果或退款结果（区分事件类型）"""
         try:
             timestamp = (headers.get("wechatpay-timestamp") or "").strip()
             # 服务器热修移植（2026-09 回调探针加固）：非数字时间戳直接 int() 抛 ValueError
@@ -233,7 +233,7 @@ class WechatPayService(PaymentService):
                     logger.error("微信回调被拒绝：回调为微信支付公钥模式，"
                                  "但未配置可用的 WECHAT_PUBLIC_KEY_PATH（路径为空或文件不存在）")
                     return None
-                # P3 修复（凭据绑定）：serial 必须与所配公钥文件的标识一致，
+                # 凭据绑定：serial 必须与所配公钥文件的标识一致，
                 # 防止同模式下另一把公钥签发的报文被本站接受（证书轮换残留/异商户公钥）。
                 if not self._serial_matches_keyfile(serial, key_path, is_cert=False):
                     logger.error(f"微信回调被拒绝：公钥模式 serial 与所配公钥不匹配 serial={serial[:32]}")
@@ -247,7 +247,7 @@ class WechatPayService(PaymentService):
                     logger.error("微信回调被拒绝：未配置可用的 WECHAT_PLATFORM_CERT_PATH 平台证书"
                                  "（且回调头非公钥模式），无法验签")
                     return None
-                # P3 修复（凭据绑定）：serial 必须与所配平台证书的实际序列号一致
+                # 凭据绑定：serial 必须与所配平台证书的实际序列号一致
                 if not self._serial_matches_keyfile(serial, cert_path, is_cert=True):
                     logger.error(f"微信回调被拒绝：平台证书模式 serial 与所配证书不匹配 serial={serial[:32]}")
                     return None
@@ -265,7 +265,7 @@ class WechatPayService(PaymentService):
                 resource.get("associated_data", "").encode(),
             )
             result = json.loads(plaintext)
-            # 【安全审计修复】跨商户回调防御：平台证书/公钥是全商户共用的，验签只能
+            # 跨商户回调防御：平台证书/公钥是全商户共用的，验签只能
             # 证明「这是微信平台签发的报文」，不能证明「这笔交易属于本商户」。任何
             # 持有自有微信商户号的攻击者都可以在自己商户下创建 out_trade_no=他人
             # 订单号、金额相同的订单并支付（钱进自己账户，成本仅手续费），再把这条
@@ -284,7 +284,7 @@ class WechatPayService(PaymentService):
                 logger.error(f"微信回调 appid 不匹配，已拒收: cb_appid={cb_appid} "
                              f"expect={self.app_id} order_no={result.get('out_trade_no')}")
                 return None
-            # H2：退款回调，返回 event=refund 供上层更新 Refund 状态
+            # 退款回调，返回 event=refund 供上层更新 Refund 状态
             if event_type.startswith("REFUND"):
                 _amt = result.get("amount") or {}
                 # 退款金额（元，Decimal）：微信在 amount.refund 给出实际退款额、
@@ -306,7 +306,7 @@ class WechatPayService(PaymentService):
                 "event": "payment",
                 "order_no": result.get("out_trade_no"),
                 "pay_trade_no": result.get("transaction_id"),
-                # P3：分→元用 Decimal，避免 float 精度误差进入金额比对链路
+                # 分→元用 Decimal，避免 float 精度误差进入金额比对链路
                 "amount": Decimal(str(result.get("amount", {}).get("total", 0))) / 100,
                 "status": result.get("trade_state"),
             }
@@ -315,7 +315,7 @@ class WechatPayService(PaymentService):
             return None
 
     def _serial_matches_keyfile(self, serial: str, key_path: str, is_cert: bool) -> bool:
-        """P3 修复（凭据绑定）：回调头 Wechatpay-Serial 必须与本地所配凭据的标识一致。
+        """凭据绑定：回调头 Wechatpay-Serial 必须与本地所配凭据的标识一致。
 
         平台证书模式：序列号 = X.509 证书 serial_number 的 hex（40 位）。
         公钥模式：公钥文件 PEM 头部含 "PUBLIC KEY ID"，直接比对文件内容中的 ID 串；
@@ -383,13 +383,13 @@ class WechatPayService(PaymentService):
     async def refund(self, order_no, pay_trade_no, amount, reason="用户申请退款",
                      refund_no: Optional[str] = None, order_amount=None) -> RefundResult:
         """
-        H4：解析返回体 refund_status。
-        L9：校验退款金额不超过订单金额。
+        解析返回体 refund_status。
+        校验退款金额不超过订单金额。
         """
         if not self.is_configured():
             return RefundResult("failed", msg="微信支付未配置")
-        # L9：退款金额不得超过订单金额（P3：去掉 +0.01 容差，多退一分也是资损）。
-        # 【安全审计修复】原写法 `if order_amount is not None and ...`：调用方漏传订单金额
+        # 退款金额不得超过订单金额（去掉 +0.01 容差，多退一分也是资损）。
+        # 原写法 `if order_amount is not None and ...`：调用方漏传订单金额
         # 时校验被整体跳过，这条资损红线形同虚设（等价于死代码）。改为 fail-closed——
         # 拿不到订单金额就拒绝退款，红线不依赖调用方自觉。
         if order_amount is None:
@@ -427,7 +427,7 @@ class WechatPayService(PaymentService):
                     if st == "SUCCESS":
                         return RefundResult("success", refund_no, rj)
                     if st in ("PROCESSING", "CLOSED"):
-                        # H4：处理中不算成功，等退款回调更新（H2）
+                        # 处理中不算成功，等退款回调更新
                         logger.info(f"微信退款处理中 order={order_no} status={st}")
                         return RefundResult("processing", refund_no, rj, st)
                     # ABNORMAL 等异常
@@ -474,7 +474,7 @@ class WechatPayService(PaymentService):
             return {"state": "error", "msg": str(e)}
 
     async def query_order(self, order_no) -> dict:
-        """A2：主动查单 GET /v3/pay/transactions/out-trade-no/{out_trade_no}?mchid=xxx
+        """主动查单 GET /v3/pay/transactions/out-trade-no/{out_trade_no}?mchid=xxx
 
         回调可能全部丢失（网络闪断、发布重启、平台重试耗尽），没有拉取式查单就没有兜底，
         用户已扣款而订单永久停在 pending/expired。V3 GET 的待签串是
@@ -531,7 +531,7 @@ class WechatPayService(PaymentService):
                 "amount": amount, "raw": data}
 
     async def download_tradebill(self, bill_date: str, bill_type: str = "ALL") -> Optional[str]:
-        """A3：下载交易账单。先 GET /v3/bill/tradebill 拿 download_url，再对该 URL 的
+        """下载交易账单。先 GET /v3/bill/tradebill 拿 download_url，再对该 URL 的
         路径+query 重新签名下载正文（微信要求下载请求同样带 Authorization）。
         不传 tar_type 时返回未压缩 CSV 文本；bill_type=ALL 含当日支付成功单与发起成功的退款单。
         账单仅保留 3 个月，次日 09:00 生成，官方建议 10:00 后拉取。
@@ -641,7 +641,7 @@ class AlipayService(PaymentService):
             # 服务商/多应用共用同一把支付宝公钥时，缺少此校验会把别的 appid 的
             # 订单号当成本站订单去激活（若订单号恰好撞上则直接送权益）。
             cb_app_id = data.get("app_id")
-            # P3 修复：本站已配置 app_id 时，回调必须携带且一致——原实现允许
+            # 本站已配置 app_id 时，回调必须携带且一致——原实现允许
             # 回调缺失 app_id 即放行，等于把绑定校验留给对端自觉。
             if self.app_id and str(cb_app_id or "") != self.app_id:
                 logger.warning(f"支付宝回调 app_id 缺失或不匹配，已拒收: {cb_app_id!r} != {self.app_id}")
@@ -661,7 +661,7 @@ class AlipayService(PaymentService):
                      refund_no: Optional[str] = None, order_amount=None) -> RefundResult:
         if not self.is_configured():
             return RefundResult("failed", msg="支付宝未配置")
-        # P3：与微信侧同口径，去掉 +0.01 退款容差，并改为 fail-closed——
+        # 与微信侧同口径，去掉 +0.01 退款容差，并改为 fail-closed——
         # 漏传订单金额时原实现直接跳过校验，退款上限形同虚设（详见微信侧同款注释）。
         if order_amount is None:
             logger.error("退款缺少订单金额，已拒绝（无法校验退款上限）order=%s", order_no)
@@ -686,7 +686,7 @@ class AlipayService(PaymentService):
         return await asyncio.to_thread(_do)
 
     async def query_order(self, order_no) -> dict:
-        """A2：支付宝主动查单 alipay.trade.query。SDK 是同步 urlopen 实现，放线程池避免阻塞事件循环。
+        """支付宝主动查单 alipay.trade.query。SDK 是同步 urlopen 实现，放线程池避免阻塞事件循环。
         订单不存在时支付宝返回业务失败（sub_code=ACQ.TRADE_NOT_EXIST）并由 SDK 抛异常，这与「未支付」
         同义；其余异常一律归为 unknown（下一轮继续问），继不猜成 unpaid。"""
         if not self.is_configured():
@@ -717,7 +717,7 @@ class AlipayService(PaymentService):
                 "raw": data}
 
     async def download_bill(self, bill_date: str, bill_type: str = "trade") -> Optional[str]:
-        """A3：支付宝对账单。SDK 未封装该接口，用通用 build_body + verified_sync_response 打
+        """支付宝对账单。SDK 未封装该接口，用通用 build_body + verified_sync_response 打
         alipay.data.dataservice.bill.downloadurl.query，拿到 zip 地址后下载并解出业务明细 CSV。
         支付宝账单 CSV 是 GBK 编码（微信是 UTF-8），必须按编码兜底解码，否则中文列名全乱、解析失败。"""
         if not self.is_configured():
@@ -851,12 +851,12 @@ async def create_payment(order_no, amount, subject, client_ip="127.0.0.1",
 
 
 # ============================================================================
-# L23：退款资格的统一护栏
+# 退款资格的统一护栏
 # ============================================================================
 # 平台共 4 条退款路径，最终都落到下面的 apply_refund：
 #   ① api/order.py     用户自助退款       —— 经 _self_refund_block 拦截
 #   ② api/admin.py     管理员兜底退款     —— 原先只拦了卡券单
-#   ③ tasks/scheduler  auto_refund_failed_reports —— 原先什么都没拦（本次修复）
+#   ③ tasks/scheduler  auto_refund_failed_reports —— 原先什么都没拦
 #   ④ tasks/scheduler  retry_failed_refunds       —— 原先只拦了卡券单
 # 「这笔订单到底有没有真实资金流入」原先由 4 处各自手写判断，口径必然漂移，
 # ③ 就是漏掉的那一条：0 元的卡券兑换单被当成真实订单退款，apply_refund 在模拟
@@ -925,7 +925,7 @@ async def apply_refund(order_no, pay_trade_no, amount, reason="用户申请退�
     # 形成“钱退了、权益与报告还在”的真实资金损失。
     if r.status in ("success", "processing"):
         return r
-    # P3 修复（渠道回退双退款）：进一步收紧回退条件——只有微信侧**确定性**未受理
+    # 渠道回退双退款：进一步收紧回退条件——只有微信侧**确定性**未受理
     # （订单不存在类错误）才回退支付宝。网络异常/超时导致的 failed 无法排除
     # 「微信已受理但响应丢失」，此时再打支付宝会造成两渠道各退一笔；
     # 不确定失败原样返回，交由调用方重试或人工核查。
@@ -937,7 +937,7 @@ async def apply_refund(order_no, pay_trade_no, amount, reason="用户申请退�
 
 
 async def query_payment(order_no: str, channel: Optional[str] = None) -> dict:
-    """A2：统一查单入口，返回归一化结果：
+    """统一查单入口，返回归一化结果：
     {"state": paid/unpaid/paying/closed/revoked/error/unknown/unsupported,
      "channel", "trade_state", "pay_trade_no", "amount": Decimal|None, "raw"}
 
@@ -959,7 +959,7 @@ async def query_payment(order_no: str, channel: Optional[str] = None) -> dict:
 
 
 async def query_refund(refund_no: str, channel: Optional[str] = None) -> dict:
-    """A2 同范式（退款侧）：统一主动查退款入口，返回归一化结果。
+    """统一主动查退款入口（与查单同范式），返回归一化结果。
 
     为什么必须有拉取式查退款：退款结论完全依赖渠道回调送达，而回调可能因验签配置错误、
     发布重启、网络抖动或平台重试耗尽而永远不到达。本项目实际发生过——验签配置缺陷使全部
@@ -975,7 +975,7 @@ async def query_refund(refund_no: str, channel: Optional[str] = None) -> dict:
 
 
 async def download_channel_bill(bill_date: str, channel: str) -> Optional[str]:
-    """A3：统一账单下载入口（bill_date 为 YYYY-MM-DD），返回 CSV 文本或 None。
+    """统一账单下载入口（bill_date 为 YYYY-MM-DD），返回 CSV 文本或 None。
     None 不区分「当日无交易」与「下载失败」，由调用方（services/reconcile.py）记账并告警。"""
     if not settings.RECONCILE_ENABLED:
         return None

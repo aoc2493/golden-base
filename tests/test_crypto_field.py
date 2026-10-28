@@ -1,4 +1,4 @@
-"""A6 敏感字段加密（utils/crypto_field）的回归测试。
+"""敏感字段加密（utils/crypto_field）的回归测试。
 
 这个模块管的是「拖库之后收款账号与真实姓名是否还安全」，以及反过来更狠的一面：
 **密文一旦被截断或换错密钥，那笔提现的收款人信息就永久不可恢复，钱也打不出去**。
@@ -196,7 +196,7 @@ def test_mask_account_matches_distribution_masking():
     assert cf.mask_account("alipay", enc) == dist_mask("alipay", plain_no)
 
 
-# ==================== 四、列宽算式（本轮新发现的风险） ====================
+# ==================== 四、列宽算式（口径说明） ====================
 
 @pytest.mark.parametrize("model,column,schema_model,schema_field", [
     (Distributor, "real_name", WithdrawRequest, "account_name"),

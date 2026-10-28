@@ -24,7 +24,7 @@ from app.core.services.config_helper import get_bool, get_float, get_config
 from app.core.services.distribution import ensure_distributor, apply_withdrawal, build_distribution_rules, promotion_progress, DISTRIBUTION_RULE_LABELS
 from app.core.services.distribution_rank import get_top_ranking, get_my_month, rank_pool_cap
 from app.core.services import consent as consent_svc
-# A6：库里的收款账号是密文，脱敏前必须先解密（故不用 services.distribution.mask_account）。
+# 库里的收款账号是密文，脱敏前必须先解密（故不用 services.distribution.mask_account）。
 from app.core.utils.crypto_field import mask_account
 
 logger = logging.getLogger(__name__)
@@ -50,7 +50,7 @@ router = APIRouter(prefix="/distribution", tags=["分销"])
 _COMMISSION_STATUS = {"pending": "待结算", "settled": "已结算", "cancelled": "已冲回"}
 _WITHDRAW_STATUS = {"auditing": "审核中", "paid": "已打款", "rejected": "已驳回"}
 
-# A7（第五十九条）：规则重大不利变更的公示文案 + 单独确认留痕（doc_type=rule_change）。
+# 第五十九条：规则重大不利变更的公示文案 + 单独确认留痕（doc_type=rule_change）。
 # 提高晋升门槛对存量推广员属不利变更，必须写清「改了什么、对已有等级有无影响」并让用户
 # 显式确认：只写「规则已更新」等于没公示，事后无法证明新口径已送达。
 # 确认不做硬拦截（不因此禁止推广/提现）：公示与留痕是义务，把未确认变成停权则是处罚。
@@ -140,10 +140,10 @@ async def distributor_status(request: Request, user: User = Depends(get_current_
         elif host:
             logger.warning(f"邀请链接兜底被拒绝：Host={host} 不在受信域名内（疑似 Host 头注入）")
     data["invite_link"] = f"{base_url}/?ref={dist.invite_code}" if base_url and dist.invite_code else ""
-    # A7：晋升进度下发到推广中心。判定与展示必须同源（都走 promotion_progress），
+    # 晋升进度下发到推广中心。判定与展示必须同源（都走 promotion_progress），
     # 否则用户看到的进度与系统实际判定不一致，会按错误预期去推广。
     data["promote"] = await promotion_progress(db, dist)
-    # A7：规则版本与变更公示（按版本号判是否已确认，不能只判「有没有确认过」）
+    # 规则版本与变更公示（按版本号判是否已确认，不能只判「有没有确认过」）
     version = str(await get_config(db, "distribution_rule_version",
                                    settings.DISTRIBUTION_RULE_VERSION) or "")
     confirmed = await consent_svc.latest_agreed_version(db, user.id, consent_svc.DOC_RULE_CHANGE)
@@ -264,7 +264,7 @@ async def team_list(user: User = Depends(get_current_user),
 
 
 def _mask_uid(user_id: int) -> str:
-    """P3 修复：用户端团队列表不再下发完整自增 user_id（与排行榜口径一致，
+    """用户端团队列表不再下发完整自增 user_id（与排行榜口径一致，
     避免 ID 枚举/爬取用户规模），仅返回尾 4 位。前端仅在昵称为空时用它做展示，
     而昵称已由 _mask_rank_nick 保证恒非空（兜底「道友+尾4位」）。"""
     s = str(user_id)
@@ -343,7 +343,7 @@ async def dist_rules(user: User = Depends(get_current_user),
     逐项构建完整 11 字段（数值与实际生效规则一致），system_configs.distribution_rules
     可按键覆盖（运营自定义）。sections 为按固定顺序的展示数组。
 
-    A7：本接口只负责「规则全文」，不负责「变更公示」：公示条与确认留痕在 /status
+    本接口只负责「规则全文」，不负责「变更公示」：公示条与确认留痕在 /status
     下发（推广中心首屏）。分开是有意的：规则全文每次进页都读，而公示只在版本号与
     已确认版本不一致时才需弹出；把两者合并会让公示逻辑随规则页一起被缓存或跳过。
     """

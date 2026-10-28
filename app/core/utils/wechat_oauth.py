@@ -1,5 +1,5 @@
 """
-微信公众号(服务号)网页授权工具（v5）
+微信公众号(服务号)网页授权工具
 - 登录主路径用 snsapi_base 静默授权：用户无感知、不弹授权框，只拿 openid（不采集昵称头像）
 - 头像/昵称同步用 snsapi_userinfo 显式授权（用户点「同步微信头像」才发起，弹确认框），
   换取 access_token 后调 /sns/userinfo 取 nickname/headimgurl（个保法：单独同意、按需采集）

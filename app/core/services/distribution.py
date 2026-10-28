@@ -3,8 +3,8 @@
 - 仅一级关系、0 门槛、真实消费计佣、退款冲回、T+7 结算、审核制提现
 - 单笔佣金 = 订单实付 ×（等级基础费率 + 月度阶梯上浮），封顶 60%；次月8号按最终档位重算补差
 - 验证付费用户（首付过7天退款期、终身只计一次）为唯一晋升维度
-- M24 已结算佣金退款冲回不产生负余额，不足计入 debt_commission
-- N10 提现支持劳务报酬代扣个税
+- 已结算佣金退款冲回不产生负余额，不足计入 debt_commission
+- 提现支持劳务报酬代扣个税
 """
 import secrets
 import logging
@@ -18,7 +18,7 @@ from app.core.models import User, Order, Distributor, CommissionLog, Withdrawal,
 from app.core.database import row_lock
 from app.core.services.config_helper import get_float, get_int, get_bool, get_config
 from app.config import settings
-# A6：敏感字段（提现实名/收款人姓名/收款账号）写入即加密、读取再解密或脱敏。
+# 敏感字段（提现实名/收款人姓名/收款账号）写入即加密、读取再解密或脱敏。
 from app.core.utils.crypto_field import encrypt_field, decrypt_field, mask_name
 
 logger = logging.getLogger(__name__)
@@ -150,7 +150,7 @@ async def bump_monthly_total(db: AsyncSession, distributor_id: int, month: str, 
 
 
 async def gen_invite_code(db: AsyncSession, length: int = 6) -> str:
-    """L2：使用 secrets 密码学安全随机生成邀请码"""
+    """使用 secrets 密码学安全随机生成邀请码"""
     for _ in range(10):
         code = "".join(secrets.choice(_CODE_ALPHABET) for _ in range(length))
         exists = await db.execute(select(Distributor.id).where(Distributor.invite_code == code))
@@ -233,7 +233,7 @@ async def bind_inviter(db: AsyncSession, user: User, invite_code: Optional[str],
     # 断链/冻结期暂停新增绑定（第五十条断链、第六十条冻结期统一规则）
     if inviter_dist.link_disabled or (inviter_dist.frozen_until and inviter_dist.frozen_until > now):
         return False
-    # P2（#11/#48 属主决策：设备启发式同人识别）：双号自推的最强信号是「两个账号同一设备」。
+    # 设备启发式同人识别：双号自推的最强信号是「两个账号同一设备」。
     # device_code 存于浏览器 localStorage，同一浏览器profile 恒定；同人开二号自绑时两者相同。
     # 命中即拒绝建立推广关系（不绑定、不计佣），从源头切断「小号买、大号拿佣金」自雇舞弊。
     # 仅当两侧 device_code 均非空才比对（微信授权主路径可能无 device_code，不误伤）。
@@ -433,7 +433,7 @@ async def promote_verified_users(db: AsyncSession, batch_size: int = 200) -> int
 
 
 async def cum_performance(db: AsyncSession, distributor_id: int) -> Decimal:
-    """A7：累计推广业绩（销售业绩）= 各自然月「月度推广总金额」之和。
+    """累计推广业绩（销售业绩）= 各自然月「月度推广总金额」之和。
 
     口径与月度阶梯/排行榜完全一致（名下订单支付成功实付之和扣退款），由 bump_monthly_total
     在计佣与退款冲回两处维护，所以「刷单后再退掉」的金额不会留在晋升门槛里。
@@ -449,7 +449,7 @@ async def promotion_progress(db: AsyncSession, dist: Distributor) -> dict:
 
     判定与展示各算一遍必然走偏：用户看到的进度与系统实际判定不一致时，用户会按错误预期
     去推广，事后争议无从举证，所以两处必须同源。
-    A7：业绩为主（performance）、人数为辅（verified_count），两者同时达标才 qualified。
+    业绩为主（performance）、人数为辅（verified_count），两者同时达标才 qualified。
     """
     level = int(dist.level or 0)
     perf = await cum_performance(db, dist.id)
@@ -483,7 +483,7 @@ async def check_promotion(db: AsyncSession, dist: Distributor) -> None:
     """第十六/十八条：达到晋升条件 -> 设待升等级，次日0点生效。
     等级永久有效不主动降级；降级重升以 promo_baseline 之后的新增计数（第十八条第4款）。
 
-    A7：晋升条件由「验证付费用户数达标」改为「累计推广业绩（主）+ 验证付费用户数（辅）
+    晋升条件由「验证付费用户数达标」改为「累计推广业绩（主）+ 验证付费用户数（辅）
     双达标」，人数单独达标不再触发晋升。原口径只看人数，正落在《禁止传销条例》第七条
     第(二)项「以发展人员的数量为依据计算和给付报酬」的表述上（等级决定费率）。
     """
@@ -511,7 +511,7 @@ async def recheck_pending_promotion(db: AsyncSession, dist: Distributor) -> bool
     """退款后重判「待升等级」是否仍达标，不再达标即撤销（返回是否撤销）。
 
     第三十五条第3款：已获等级不降级，只撤销尚未生效的待升。
-    A7：撤销口径必须与晋升口径同源。退款会同时冲减验证付费用户数（_rollback_verified_user）
+    撤销口径必须与晋升口径同源。退款会同时冲减验证付费用户数（_rollback_verified_user）
     与月度业绩（bump_monthly_total 负值），原实现只看人数——业绩已跌破门槛的人仍会在次日0点
     升上去，等于用退款刷出了等级。故改为任一维度不再达标即撤销。
     """
@@ -559,9 +559,9 @@ async def apply_pending_promotions(db: AsyncSession, batch_size: int = 200) -> i
 
 
 async def settle_due_commissions(db: AsyncSession, batch_size: int = 100) -> int:
-    """M8：分批处理 pending 佣金，避免一次性全表加载。
+    """分批处理 pending 佣金，避免一次性全表加载。
 
-    修复死循环：原实现对“未到期”的记录 continue 但不改其状态，下一轮 SELECT
+    死循环成因：原实现对“未到期”的记录 continue 但不改其状态，下一轮 SELECT
     又选中同一批；当未到期记录数 >= batch_size 时 len(logs) == batch_size，
     末尾的 break 条件永不成立 → while True 无限循环，调度任务永久挂起并占住会话。
     改为按 id 游标单向推进，保证每条记录在一次运行内只被考察一次。"""
@@ -660,7 +660,7 @@ async def _cancel_one(db: AsyncSession, log: CommissionLog) -> None:
                     total_commission=Distributor.total_commission - amt
                 ).execution_options(synchronize_session="fetch"))
         elif prev == "settled":
-            # M24：可提现余额优先冲回，不足部分计入 debt_commission，不出现负余额。
+            # 可提现余额优先冲回，不足部分计入 debt_commission，不出现负余额。
             # debt_commission 只记不还：全库没有任何自动补债逻辑，后续佣金不会先抵扣欠款，
             # 冲不回的差额就是平台净损失，只能靠人工对账追讨（后台推广员列表以「冲回欠款」展示）。
             # 若要改成自动补债，记账口径需先与业务确认（total_commission 是否随还债回升）。
@@ -708,7 +708,7 @@ async def on_order_refund(db: AsyncSession, order: Order) -> None:
         await clawback_distributor_month(db, dist_id, month)
     # 第三十五条：验证付费用户回退（仅当退款单为触发验证的首单）
     await _rollback_verified_user(db, order)
-    # A7：退款同时冲减了「月度业绩」与「验证付费用户数」，两项都落库之后再统一重判待升等级。
+    # 退款同时冲减了「月度业绩」与「验证付费用户数」，两项都落库之后再统一重判待升等级。
     # 顺序不能提前：只看其中一项的中间态判定会漏掉另一项造成的不达标，而晋升是「业绩为主、
     # 人数为辅」双条件，任一维度跌破门槛都必须撤销尚未生效的待升（已生效等级不降级）。
     if dist_id:
@@ -724,7 +724,7 @@ async def _rollback_verified_user(db: AsyncSession, order: Order) -> None:
     - status=0（待验证/退款期内）→ 直接置 2，从未计入（第三十五条第1款）；
     - status=1（已计入）→ verified_paid_count 扣 1（下限0）后置 2（第三十五条第2款）；
       已获等级不降级；待升等级是否撤销由 on_order_refund 在业绩与人数两项都冲减完毕后
-      统一调 recheck_pending_promotion 判定（A7：口径与晋升同源，不在本函数里各算一遍）。
+      统一调 recheck_pending_promotion 判定（口径与晋升同源，不在本函数里各算一遍）。
     复购单退款不影响验证状态（验证只认首单）。"""
     vpu = (await db.execute(select(VerifiedPaidUser).where(
         VerifiedPaidUser.first_order_id == order.id))).scalar_one_or_none()
@@ -754,7 +754,7 @@ def gen_withdraw_no() -> str:
 
 
 def calc_withdraw_tax(amount: Decimal) -> Decimal:
-    """N10：劳务报酬个税代扣（简化：按配置固定比例，默认 20%）"""
+    """劳务报酬个税代扣（简化：按配置固定比例，默认 20%）"""
     if not settings.WITHDRAW_TAX_ENABLED:
         return Decimal("0.00")
     return _money(amount * Decimal(str(settings.WITHDRAW_TAX_RATE)))
@@ -800,7 +800,7 @@ async def apply_withdrawal(db, user, amount, channel, account_name, account_no):
         return False, f"每日最多提现 {daily_limit} 次，今日次数已用完，请明日再试", None
     # 第三十条：收款实名须与推广员本人一致。首次提现绑定实名；此后不一致触发风控，
     # 按「暂缓打款/补充核验」处理（仍建审核单锁住余额，交人工核验，不自动打款）。
-    # A6：库里存的是密文，比对前必须先解密。不能拿密文直接比——AES-GCM 每次加密都用
+    # 库里存的是密文，比对前必须先解密。不能拿密文直接比——AES-GCM 每次加密都用
     # 随机 nonce，同一个人两次提现的密文必然不同，用密文比会把「实名一致」误判成
     # 「实名不一致」，从此每一笔二次提现都被挂上风控备注、要人工核验才能打款。
     # 解密失败（密钥被换过/密文被篡改）必须 fail-closed：若按空值处理就会走进下面的
@@ -820,7 +820,7 @@ async def apply_withdrawal(db, user, amount, channel, account_name, account_no):
                          .execution_options(synchronize_session="fetch"))
     elif bound_name != account_name:
         risk_note = "【风控】收款实名与本人认证不一致，需人工补充核验后打款"
-        # A6：日志里绝不写明文姓名。库里加密了却把明文喷进日志等于白做——日志的访问
+        # 日志里绝不写明文姓名。库里加密了却把明文喷进日志等于白做——日志的访问
         # 权限通常比库松、留存更久，还会被采集进第三方日志平台。只记 id 与脱敏姓名。
         logger.warning(f"[提现风控] 实名不一致 distributor_id={dist.id} "
                        f"认证={mask_name(bound_name)} 收款={mask_name(account_name)}")
@@ -848,7 +848,7 @@ async def apply_withdrawal(db, user, amount, channel, account_name, account_no):
         .execution_options(synchronize_session="fetch"))
     if (res.rowcount or 0) == 0:
         return False, "可提现佣金不足", None
-    # A6：收款人姓名与账号加密落库。加密失败或未配密钥时 encrypt_field 会降级为明文并
+    # 收款人姓名与账号加密落库。加密失败或未配密钥时 encrypt_field 会降级为明文并
     # 打 critical 告警，不在此抛异常阻断提现——资金链路可用性优先，但告警必须响到运维。
     wd = Withdrawal(withdraw_no=gen_withdraw_no(), distributor_id=dist.id, user_id=user.id,
                     amount=amt, tax_amount=tax, actual_amount=actual, status="auditing",
@@ -863,7 +863,7 @@ async def apply_withdrawal(db, user, amount, channel, account_name, account_no):
 
 
 async def audit_withdrawal(db, withdrawal_id, action, auditor, remark=None, refund_count: bool = True):
-    """M17：审核时对提现单加行锁，防止两管理员并发操作结果互相覆盖。
+    """审核时对提现单加行锁，防止两管理员并发操作结果互相覆盖。
     V1.3 第三十条失败返还：驳回时 refund_count=True（非推广员原因，如平台/银行/风控误判）
     返还当次提现次数（count_refunded=1，不占每日2次限额）；refund_count=False（违规冻结导致）不返还。"""
     wd_res = await db.execute(row_lock(select(Withdrawal).where(Withdrawal.id == withdrawal_id)))
@@ -882,7 +882,7 @@ async def audit_withdrawal(db, withdrawal_id, action, auditor, remark=None, refu
     # 退回余额两次（凭空多出可提现佣金）。用带状态条件的原子 UPDATE 抢占，affected==0 即已被处理。
     # MySQL 下 row_lock 已把同一提现单串行化，本条 UPDATE 是双保险；SQLite 下它是唯一护栏。
     new_status = "paid" if action == "paid" else "rejected"
-    # 审核人没填备注时必须保留申请时写入的备注（尤其 A6 的实名风控备注）：直接写 None 会在
+    # 审核人没填备注时必须保留申请时写入的备注（尤其实名风控备注）：直接写 None 会在
     # 点下「确认已打款」的瞬间销毁「本笔需人工核验实名」这条风控留痕，事后既无法证明这笔
     # 为什么走了人工核验，也无法在纠纷中说明平台尽到了核验义务。
     values = {"status": new_status, "audited_at": datetime.now(), "auditor": auditor,
@@ -898,7 +898,7 @@ async def audit_withdrawal(db, withdrawal_id, action, auditor, remark=None, refu
     if not claimed:
         return False, "该提现单已处理"
     if action == "rejected" and dist:
-        # M-1 修复：驳回退还余额前先冲抵 debt_commission。
+        # 驳回退还余额前先冲抵 debt_commission。
         # 场景：订单退款发生在提现审核期间时，_cancel_one 的 settled 冲回分支只认
         # available_commission（看不到挂在审核提现单里的钱），于是把差额记成冲回欠款；
         # 此刻驳回若仍把金额全额退回 available，推广员就能对同一笔已被冲回的佣金二次
@@ -935,7 +935,7 @@ async def audit_withdrawal(db, withdrawal_id, action, auditor, remark=None, refu
 
 def mask_account(channel: str, account_no: str) -> str:
     """收款账号脱敏（入参必须是【明文】）。
-    A6 后库里存的是密文，直接把密文传进来会脱敏出一串 enc:v1: 开头的乱码（既不
+    库里存的是密文，直接把密文传进来会脱敏出一串 enc:v1: 开头的乱码（既不
     可读也不算脱敏）。从库里取出的值请一律改用 utils.crypto_field.mask_account，
     它先解密再调本函数；本函数只当纯计算保留。
     """
@@ -1025,7 +1025,7 @@ async def build_distribution_rules(db: Optional[AsyncSession] = None) -> dict:
         "mode": ("一级直推：不设二级及以上层级、不收取任何入门费、不以付费为推广前提、无团队计酬；"
                  "您只从直接邀请用户的真实消费中获得推广服务费，不按发展人数计酬"),
         "level_desc": level_desc,
-        # A7：文案必须与判定同源（都读 settings 的两个门槛），不得写死数字：把门槛调高却忘改
+        # 文案必须与判定同源（都读 settings 的两个门槛），不得写死数字：把门槛调高却忘改
         # 文案，用户看到的晋升条件就与实际不符——这既是虚假宣传，也是变更未公示。
         "promote_desc": (
             f"晋升以销售业绩为主、推广人数为辅，两项需同时达标："

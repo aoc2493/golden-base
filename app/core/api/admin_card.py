@@ -1,6 +1,6 @@
 """管理端卡券接口：目录 / 批量生码 / 批次 / 卡密列表 / 作废 / 导出
 
-接入要点（全部复用 H5 既有的管理端安全机制，不再自建一套）：
+接入要点（全部复用本底座既有的管理端安全机制，不再自建一套）：
 1) 鉴权复用 admin.require_admin：常量时间比较 + 按 IP 失败计数锁定 +
    审计日志（admin_auth_granted / denied），比独立版「裸比较一个内置默认令牌」强得多。
 2) 敏感操作（生码 / 作废 / 查看明文 / 导出）统一走本模块的二次密码校验，
@@ -305,7 +305,7 @@ async def card_codes_by_batches(request: Request, ids: str = Query("", max_lengt
     rows = (await db.execute(
         select(CardCode).where(CardCode.batch_id.in_(id_list))
         .order_by(CardCode.id.asc()))).scalars().all()
-    # P3 护栏：批量取码单次上限 2 万条（20 批 × 满批），防止误操作一次拖走全库卡密；
+    # 护栏：批量取码单次上限 2 万条（20 批 × 满批），防止误操作一次拖走全库卡密；
     # 正常运营一屏的批次量远小于此，超出部分截断并提示分批拉取。
     if len(rows) > 20000:
         rows = rows[:20000]
@@ -385,7 +385,7 @@ async def card_export(batch_id: int,
     if not batch:
         return error(ErrorCode.PARAM_ERROR, "批次不存在")
     rows = await card_svc.list_batch_codes(db, batch_id)
-    # 安全审计修复：只看 status=unused 会把「已过期但仍 unused」的卡原样导给渠道，
+    # 只看 status=unused 会把「已过期但仍 unused」的卡原样导给渠道，
     # 用户买到后兑换才发现过期，直接变成客诉与退款争议。这里：
     #   1) 过期未用卡不再进入导出清单；
     #   2) 顺手 CAS 置 disabled（WHERE status='unused'，与兑换/作废的并发交错安全），

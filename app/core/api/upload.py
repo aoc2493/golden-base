@@ -11,7 +11,7 @@ MAX_AVATAR_SIZE = 2 * 1024 * 1024
 MAX_FEEDBACK_SIZE = 5 * 1024 * 1024
 _READ_CHUNK = 64 * 1024
 
-# M13：文件头魔数白名单（content-type 可伪造，必须校验真实文件头）
+# 文件头魔数白名单（content-type 可伪造，必须校验真实文件头）
 def _is_real_image(content: bytes) -> bool:
     if len(content) < 12:
         return False
@@ -53,7 +53,7 @@ async def _validate(file: UploadFile, max_size: int):
         return None, err
     if not _is_real_image(content):
         return None, "文件内容不是有效图片，禁止上传"
-    # L26：体积上限管不住像素数（详见 oss.MAX_UPLOAD_PIXELS 的注释与实测数据），
+    # 体积上限管不住像素数（详见 oss.MAX_UPLOAD_PIXELS 的注释与实测数据），
     # 必须在解码之前按图片头里的声明尺寸拦截。放在这一层而不是只放在压缩环节，
     # 是为了给出可操作的提示：压缩失败一律返回 None，接口只会说「上传失败，请稍后重试」，
     # 拿着超大图的用户会一直重试下去。

@@ -1,20 +1,20 @@
 """
-定时任务调度 v7
+定时任务调度
 1. 清理过期缓存（每日凌晨）
 2. 关闭超时订单（每5分钟）
-3. 失败报告自动退款（每10分钟，三态处理 + 报告状态同步 T17）
-4. 退款失败重试（每30分钟，超3次告警 T6）
-5. 佣金 T+N 结算（每30分钟，分批 M8）
+3. 失败报告自动退款（每10分钟，三态处理 + 报告状态同步）
+4. 退款失败重试（每30分钟，超3次告警）
+5. 佣金 T+N 结算（每30分钟，分批处理）
 6. 过期按天权益清理（每小时）
-7. 过期月会员 level 同步（每小时，M7）
-8. 计佣失败重试（每15分钟，T5）
+7. 过期月会员 level 同步（每小时）
+8. 计佣失败重试（每15分钟）
 9. 验证付费用户转正+等级生效（每30分钟，V1.3 第十六~十八条）
 10. 月度阶梯差额补发+排行榜奖励结算（次月8号 01:00，V1.3 第二十九条）
-11. 支付主动查单/掉单补偿（每2分钟，A2）
-12. 每日渠道对账轧账（默认 10:30，A3）
-13. AI 生成日志留存期清理（每日 03:30，A4）
-14. 退款主动核实（每5分钟，A2 退款侧）
-M20：分布式锁 TTL 统一延长到 600 秒，避免长任务超时重复执行
+11. 支付主动查单/掉单补偿（每2分钟）
+12. 每日渠道对账轧账（默认 10:30）
+13. AI 生成日志留存期清理（每日 03:30）
+14. 退款主动核实（每5分钟，退款侧）
+分布式锁 TTL 统一延长到 600 秒，避免长任务超时重复执行
 """
 import logging
 from datetime import datetime, timedelta
@@ -41,13 +41,13 @@ CARD_CHANNEL = "card"
 
 logger = logging.getLogger(__name__)
 scheduler = AsyncIOScheduler()
-_LOCK_TTL = 600  # M20：统一 10 分钟
+_LOCK_TTL = 600  # 统一 10 分钟
 
 
 async def _acquire_lock(lock_name: str, ttl_seconds: int = _LOCK_TTL) -> bool:
     """调度任务互斥锁。
 
-    V-2：Redis 故障时 fail-closed（拒绝放行）。原实现降级返回 True（视为抢到锁），
+    Redis 故障时 fail-closed（拒绝放行）。原实现降级返回 True（视为抢到锁），
     多 worker 部署下自动退款/退款重试/月度结算等关键任务会被同时执行两份——各向支付平台
     发起一笔真实退款、重复发放佣金与排行榜奖金。Redis 故障时本轮直接跳过，任务在下一轮
     （interval/cron 周期）自然补跑；对财务类任务来说「暂时不跑」远好于「并发重复跑」。"""
@@ -90,7 +90,7 @@ async def close_expired_orders():
 
 
 async def auto_refund_failed_reports():
-    """失败报告自动退款（failed 超 10 分钟）。T17：退款成功后同步报告状态为 refunded"""
+    """失败报告自动退款（failed 超 10 分钟）。退款成功后同步报告状态为 refunded"""
     if not await _acquire_lock("auto_refund"):
         return
     async with AsyncSessionLocal() as db:
@@ -104,7 +104,7 @@ async def auto_refund_failed_reports():
                 if not order or order.status != "completed":
                     report.retry_count = 99
                     continue
-                # L23：本任务是 4 条退款路径中唯一**完全没有**校验资金流入的一条，
+                # 本任务是 4 条退款路径中唯一**完全没有**校验资金流入的一条，
                 # 却是卡券兑换单与会员 0 元解读单都会走到的路径（两者都会建 Report）。
                 # 少了这道判断时：报告生成失败 → 本任务对一笔 0 元订单发起退款 →
                 # 模拟支付模式下 apply_refund 直接判成功 → revoke_refunded_order
@@ -149,7 +149,7 @@ async def auto_refund_failed_reports():
                                 refund_no=refund_no)
                 db.add(refund)
                 await db.flush()
-                # V-2：退款单号在入库时即预生成并原样传给平台。此前调用 apply_refund 时不传
+                # 退款单号在入库时即预生成并原样传给平台。此前调用 apply_refund 时不传
                 # refund_no，由平台内部临时生成——若进程在拿到结果前崩溃，Refund 行上就是空单号，
                 # 后续 retry_failed_refunds 重试时会再生成一个新单号，向支付平台发起第二笔真实退款。
                 # 预生成后，同一条退款单的任何重试路径都复用同一个 out_refund_no，
@@ -163,7 +163,7 @@ async def auto_refund_failed_reports():
                 if result.ok:
                     refund.status = "refunded"
                     order.status = "refunded"
-                    report.status = "refunded"  # T17
+                    report.status = "refunded"
                     await revoke_refunded_order(db, order)
                 elif result.status == "processing":
                     refund.status = "processing"
@@ -185,7 +185,7 @@ async def auto_refund_failed_reports():
 
 
 async def retry_failed_refunds():
-    """退款失败重试（最多3次）。T6：达到上限记录 error 级别告警日志，等待人工介入"""
+    """退款失败重试（最多3次）。达到上限记录 error 级别告警日志，等待人工介入"""
     if not await _acquire_lock("retry_refund"):
         return
     async with AsyncSessionLocal() as db:
@@ -194,7 +194,7 @@ async def retry_failed_refunds():
                 select(Refund).where(Refund.status == "failed", Refund.retry_count < 3))).scalars().all()
             exhausted = (await db.execute(
                 select(Refund).where(Refund.status == "failed", Refund.retry_count >= 3))).scalars().all()
-            # T6：重试耗尽的退款单告警（每次运行只告警一次/条，日志可被监控采集）
+            # 重试耗尽的退款单告警（每次运行只告警一次/条，日志可被监控采集）
             for r in exhausted:
                 logger.error(f"[退款告警] 退款单 id={r.id} order_id={r.order_id} 已重试3次仍失败，"
                              f"原因={r.fail_reason}，需人工在支付平台核查处理")
@@ -208,7 +208,7 @@ async def retry_failed_refunds():
                 # 卡券兑换单（pay_channel='card'）不存在真实资金流，任何退款单都是误建；
                 # 一旦重试成功同样会触发 revoke_refunded_order 撤销用户权益，而卡券已是
                 # used 无法重兑 —— 用户白丢权益。直接终结该退款单，不再打支付平台。
-                # L23：收紧为统一判定。原实现只认卡券单（pay_channel='card'），
+                # 收紧为统一判定。原实现只认卡券单（pay_channel='card'），
                 # 漏掉了同类「无真实资金流入」的订单——最典型的是会员期内 ensure-report
                 # 产生的 0 元解读单（pay_channel='member', amount=0）。这类订单一旦遗留了
                 # failed 退款单被本任务重试成功，同样会 revoke_refunded_order 撤销用户权益，
@@ -349,7 +349,7 @@ async def expire_entitlements():
 
 
 async def sync_overdue_memberships():
-    """M7：过期月会员 level 同步为 none，保证管理后台展示一致"""
+    """过期月会员 level 同步为 none，保证管理后台展示一致"""
     if not await _acquire_lock("sync_membership", 300):
         return
     async with AsyncSessionLocal() as db:
@@ -364,7 +364,7 @@ async def sync_overdue_memberships():
 
 
 async def retry_failed_commissions():
-    """T5：计佣失败重试，避免佣金静默丢失"""
+    """计佣失败重试，避免佣金静默丢失"""
     if not await _acquire_lock("retry_commission", 300):
         return
     async with AsyncSessionLocal() as db:
@@ -396,7 +396,7 @@ async def retry_failed_commissions():
 
 
 async def sync_pending_payments():
-    """A2：支付主动查单 + 掉单补偿（每 2 分钟）。
+    """支付主动查单 + 掉单补偿（每 2 分钟）。
 
     回调丢失（网络闪断/发布重启/平台重试耗尽）时用户已扣款而订单永不履约，这是纯回调
     架构的固有缺口。本任务向渠道主动查单，确认已收款则走与回调完全相同的 CAS 履约入口补发放，
@@ -420,7 +420,7 @@ async def sync_pending_payments():
 
 
 async def sync_processing_refunds():
-    """A2 同范式（退款侧）：主动向渠道核实「退款中」的退款单，把结论拉回来落库。
+    """主动向渠道核实「退款中」的退款单，把结论拉回来落库（与支付查单同范式）。
 
     为什么必须有：退款最终结论原先只来自渠道回调，而回调会因验签配置错误、发布重启、网络
     抖动或平台重试耗尽而永远不到达——退款单就永久停在 processing，管理员既看不到「退款
@@ -467,7 +467,7 @@ async def sync_processing_refunds():
 
 
 async def daily_reconciliation():
-    """A3：每日渠道对账（默认 RECONCILE_HOUR=10 点的 30 分，微信次日 09:00 生成前一日账单，
+    """每日渠道对账（默认 RECONCILE_HOUR=10 点的 30 分，微信次日 09:00 生成前一日账单，
     官方建议 10:00 后拉取；错开半小时避开整点集中拉单）。
     回溯 RECONCILE_LOOKBACK_DAYS 天逐日轧账，补跑漏账；差错只入账不改账，
     仅「渠道已收款而本地未履约」会走同源 CAS 入口自动补履约。
@@ -486,7 +486,7 @@ async def daily_reconciliation():
 
 
 async def purge_ai_generation_logs():
-    """A4：清理超过留存期的 AI 生成日志（每日 03:30，紧随缓存清理之后）。
+    """清理超过留存期的 AI 生成日志（每日 03:30，紧随缓存清理之后）。
 
     为何既要留存又要清理：《标识办法》第十一条要求生成日志留存不少于六个月，
     但日志里带 user_id 与输入摘要，属于个人信息；无限期保留反而违反《个保法》
@@ -523,7 +523,7 @@ async def purge_ai_generation_logs():
 
 
 async def alert_heartbeat():
-    """B2：每日告警通道心跳（默认 09:00）。
+    """每日告警通道心跳（默认 09:00）。
 
     为何必须有：告警通道的故障形态是「静默」——机器人被移出群、钉钉安全设置从加签
     改成关键词而关键词不匹配、webhook 过期，表现都是一条告警也收不到，与「系统正常」
@@ -564,24 +564,24 @@ def start_scheduler():
     scheduler.add_job(expire_entitlements, "interval", hours=1, id="expire_entitlement", replace_existing=True)
     scheduler.add_job(sync_overdue_memberships, "interval", hours=1, id="sync_membership", replace_existing=True)
     scheduler.add_job(retry_failed_commissions, "interval", minutes=15, id="retry_commission", replace_existing=True)
-    # A2：支付主动查单/掉单补偿（必须在 close_expired_orders 之外独立跑：关单只改状态，
+    # 支付主动查单/掉单补偿（必须在 close_expired_orders 之外独立跑：关单只改状态，
     # 不会去渠道核实钱到底收没收）
     scheduler.add_job(sync_pending_payments, "interval", minutes=2, id="pay_sync", replace_existing=True)
-    # A2 同范式（退款侧）：退款主动核实。退款结论不能只等回调——验签配置错误/发布重启/
+    # 退款主动核实（与支付查单同范式）。退款结论不能只等回调——验签配置错误/发布重启/
     # 平台重试耗尽都会让回调永不到达，退款单永久停在「退款中」，后台无从判断钱退没退。
     scheduler.add_job(sync_processing_refunds, "interval", minutes=5,
                       id="refund_sync", replace_existing=True)
-    # A3：每日渠道对账（资金系统的最后一道防线）
+    # 每日渠道对账（资金系统的最后一道防线）
     if settings.RECONCILE_ENABLED:
         scheduler.add_job(daily_reconciliation, "cron", hour=settings.RECONCILE_HOUR, minute=30,
                           id="reconcile", replace_existing=True)
-    # A4：生成日志留存期清理（法定下限 180 天，超期即属过度留存个人信息）
+    # 生成日志留存期清理（法定下限 180 天，超期即属过度留存个人信息）
     scheduler.add_job(purge_ai_generation_logs, "cron", hour=3, minute=30,
                       id="purge_ai_log", replace_existing=True)
-    # B2：告警通道每日心跳。放在对账之后（对账 10:30）而不与其同刻：心跳要报的是
+    # 告警通道每日心跳。放在对账之后（对账 10:30）而不与其同刻：心跳要报的是
     # 「昨日至今」的统计，早点发才能在工作日开始时就看到，而不是午后。
     if settings.ALERT_HEARTBEAT_ENABLED:
         scheduler.add_job(alert_heartbeat, "cron", hour=int(settings.ALERT_HEARTBEAT_HOUR or 0) % 24,
                           minute=0, id="alert_heartbeat", replace_existing=True)
     scheduler.start()
-    logger.info("定时任务调度器已启动（v7）")
+    logger.info("定时任务调度器已启动")

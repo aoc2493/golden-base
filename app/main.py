@@ -46,7 +46,7 @@ class _RequestIdFilter(logging.Filter):
         record.request_id = _request_id_var.get()
         return True
 
-# T1：进程级统一东八区，保证 datetime.now() 与业务一致
+# 进程级统一东八区，保证 datetime.now() 与业务一致
 try:
     os.environ.setdefault("TZ", settings.APP_TIMEZONE)
     if hasattr(time, "tzset"):
@@ -75,7 +75,7 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("应用启动中...")
-    # B2：告警通道必须在启动自检之前接入。自检的阻断项与强烈建议项都是 ERROR 级，
+    # 告警通道必须在启动自检之前接入。自检的阻断项与强烈建议项都是 ERROR 级，
     # 而「服务因配置错误起不来」正是最需要有人立刻知道的故障；晚挂一步就一条也发不出去。
     install_alert_handler()
     try:
@@ -115,8 +115,8 @@ _SAMPLE_SECRET_VALUES = {
 
 
 def _startup_check():
-    """启动自检：默认密钥/弱密码/生产CORS/HTTPS回调（H5/N14/N9）
-    H1：密钥类检查改为 fail-closed——任何环境（含开发/演示）未配置或仍用默认值一律阻断启动，
+    """启动自检：默认密钥/弱密码/生产CORS/HTTPS回调/H5 来源
+    密钥类检查改为 fail-closed——任何环境（含开发/演示）未配置或仍用默认值一律阻断启动，
     不再按环境白名单放行已知密钥。"""
     warns = []
     errors = []
@@ -124,8 +124,8 @@ def _startup_check():
     # 安全强烈建议：ERROR 级日志醒目提示，但不参与下方 raise 判定（不阻断启动）。
     # 用于「最高安全提示、但硬阻断会让合法部署起不来」的项（如生产未配管理端 IP 白名单）。
     advisories = []
-    # H1：JWT/管理令牌必须显式配置，默认空值或弱值在任意环境直接阻断（fail-closed）
-    # P3 修复：JWT 密钥最低长度 16→32（HS256 抗暴力破解的有效熵下限），并限定算法白名单
+    # JWT/管理令牌必须显式配置，默认空值或弱值在任意环境直接阻断（fail-closed）
+    # JWT 密钥最低长度 16→32（HS256 抗暴力破解的有效熵下限），并限定算法白名单
     if not settings.JWT_SECRET_KEY or settings.JWT_SECRET_KEY.strip().startswith("change-me") \
             or len(settings.JWT_SECRET_KEY.strip()) < 32:
         blocking.append("JWT_SECRET_KEY 未配置或强度不足（至少 32 位随机串），必须设置")
@@ -134,7 +134,7 @@ def _startup_check():
     if not settings.ADMIN_TOKEN or settings.ADMIN_TOKEN.strip().startswith("change-me") \
             or len(settings.ADMIN_TOKEN.strip()) < 8:
         blocking.append("ADMIN_TOKEN 未配置或强度不足（至少 8 位随机串），必须设置")
-    # A6：敏感字段加密密钥。不配也能跑（crypto_field 会降级为明文落库并刷 critical），
+    # 敏感字段加密密钥。不配也能跑（crypto_field 会降级为明文落库并刷 critical），
     # 但那意味着全库收款账号与真实姓名以明文存储：一旦拖库或备份外泄就是直接的资金损失，
     # 且属《个保法》第五十一条明确要求的技术措施。与 JWT 同级处理：阻断启动，不给「先上线再补」的机会。
     if not settings.SENSITIVE_FIELD_KEY or settings.SENSITIVE_FIELD_KEY.strip().startswith("change-me") \
@@ -144,7 +144,7 @@ def _startup_check():
     # 安全红线：SQLite 仅限非生产环境，防止演示配置裸奔上线
     if settings.DB_TYPE == "sqlite":
         warns.append("当前使用 SQLite，生产环境请使用 MySQL")
-    # N14：数据库/Redis 弱密码检查。占位默认口令只 warn 拦不住误部署：
+    # 数据库/Redis 弱密码检查。占位默认口令只 warn 拦不住误部署：
     # 生产环境（is_prod_env）升级为阻断（fail-closed，与 JWT/ADMIN_TOKEN 同一哲学）——
     # MySQL 用默认/弱口令等于把资金库钥匙挂在门上；非生产保持告警，方便本地/测试起库。
     # SQLite 本地文件不联网，DB_PASSWORD 无意义，不做数据库侧判定。
@@ -177,7 +177,7 @@ def _startup_check():
         warns.append("支付宝未配置")
     if not (settings.COS_SECRET_ID and settings.COS_BUCKET):
         warns.append("腾讯云COS未配置，头像/反馈图片上传不可用")
-    # H5：生产环境必须显式配置 CORS，绝不允许 *
+    # 生产环境必须显式配置 CORS，绝不允许 *
     if _is_prod_env():
         # 模拟支付仅用于本地演示链路，生产开启等于白送商品
         if settings.PAYMENT_MOCK:
@@ -194,7 +194,7 @@ def _startup_check():
             errors.append("DB_PASSWORD 仍是 .env.example 的示例值，生产环境必须替换")
         if settings.REDIS_PASSWORD == "dev-redis-password-change-me":
             errors.append("REDIS_PASSWORD 仍是 .env.example 的示例值，生产环境必须替换")
-        # Redis 故障降级口径。不阻断的理由：这是明确的属主可用性取舍（Redis 抖动时
+        # Redis 故障降级口径。不阻断的理由：这是明确的运营方可用性取舍（Redis 抖动时
         # 是整体拒绝还是继续放行），且启动期另有 _check_redis_reachable 保证开服时 Redis 可用。
         # 但它必须每次启动都留痕：置 false 之后，登录爆破限流、token 注销黑名单、会员额度
         # 互斥锁会在 Redis 不可达的整个窗口内静默空转，而日志里一行都看不出来。
@@ -205,19 +205,19 @@ def _startup_check():
                 "docker-compose 已用 healthcheck 保证 Redis 先于后端就绪，无明确可用性诉求请保持默认 true")
         if not settings.cors_origins_list:
             errors.append("生产环境必须配置 CORS_ORIGINS（H5 前端域名），禁止放行所有来源")
-        # N9：支付回调必须 HTTPS
+        # 支付回调必须 HTTPS
         for url_name in ("WECHAT_NOTIFY_URL", "ALIPAY_NOTIFY_URL"):
             url = getattr(settings, url_name, "")
             if url and url.startswith("http://"):
                 warns.append(f"{url_name} 使用了 HTTP，微信/支付宝支付回调要求 HTTPS")
-        # M6：生产环境管理端资金操作必须配置二次密码（退款/提现打款/会员调整的最后一道门）
+        # 生产环境管理端资金操作必须配置二次密码（退款/提现打款/会员调整的最后一道门）
         if not settings.ADMIN_OPERATE_PASSWORD:
             errors.append("生产环境必须配置 ADMIN_OPERATE_PASSWORD（管理端敏感操作二次密码）")
         # 安全加固：默认管理令牌硬编码在代码里（=公开已知），生产未配置或仍用默认值时 fail-closed，
         # 防止 .env 缺行时管理端带着仓库里人人可得的默认令牌上线。
         if not settings.ADMIN_TOKEN or settings.ADMIN_TOKEN == "change-me-admin-token":
             errors.append("生产环境必须在 .env 配置自定义 ADMIN_TOKEN，禁止使用代码默认值")
-        # A4 合规：AI 生成合成内容必须带真实服务提供者标识（《标识办法》+ GB 45438-2025）。
+        # 合规：AI 生成合成内容必须带真实服务提供者标识（《标识办法》+ GB 45438-2025）。
         # 【接线状态】core 只提供标识工具（utils/ai_mark.py），自己不生成任何内容，
         # 所以全库没有写入点：reports.ai_meta 要由真正调用模型的插件在生成时写。
         # 由阻断降为最高级告警的理由：不含 AI 内容的部署没有法定标识义务，为一个此刻
@@ -248,7 +248,7 @@ def _startup_check():
             warns.append("ADMIN_TOKEN 长度不足 16 位，生产建议使用更长随机串")
         if settings.ADMIN_OPERATE_PASSWORD and len(settings.ADMIN_OPERATE_PASSWORD.strip()) < 8:
             warns.append("ADMIN_OPERATE_PASSWORD 长度不足 8 位，生产建议使用更强操作密码")
-        # P5：信任反代头但未配共享密钥 → 同机任何进程（运维脚本、容器内副服务、被渗透的旁路
+        # 信任反代头但未配共享密钥 → 同机任何进程（运维脚本、容器内副服务、被渗透的旁路
         # 容器）都可直连 127.0.0.1:8000 并伪造 X-Real-IP，从而绕过 IP 维度限流、管理端爆破锁定、
         # 以及将来任何基于 IP 的安全策略。不阻断（同上：合理部署可能确实不配密钥），用最高告警。
         if settings.TRUST_PROXY_HEADERS and not (settings.PROXY_AUTH_SECRET or "").strip():
@@ -259,7 +259,7 @@ def _startup_check():
                 errors.append(_msg + "（SECURITY_STRICT_IP_POLICY=true，已升级为阻断项）")
             else:
                 advisories.append(_msg + "；确认无法注入该头时可置 SECURITY_STRICT_IP_POLICY=false 保持现状")
-        # B2：告警通道。不做硬阻断的理由与 IP 白名单一致：没配机器人也能合法上线（自己看日志），
+        # 告警通道。不做硬阻断的理由与 IP 白名单一致：没配机器人也能合法上线（自己看日志），
         # 但资金类故障（退款重试耗尽、金额与渠道不符、对账差错）的发现时延直接等于资损金额，
         # 所以用最高级别的醒目告警提示，而不是静默跳过。
         if not alert_ready():
@@ -279,7 +279,7 @@ def _startup_check():
         if not settings.WITHDRAW_TAX_ENABLED:
             gaps.append("WITHDRAW_TAX_ENABLED=false：推广佣金提现不代扣个人所得税，"
                         "平台仍须自行履行代扣代缴/申报义务")
-        gaps.append("年龄门槛（原 A8 成年声明/监护同意）已按属主决策于 2026-09-11 关闭："
+        gaps.append("年龄门槛（成年声明/监护同意）在本底座里恒放行："
                     "minor_guard.gate_payer/gate_bio 恒放行，下单与建档不再做未成年人拦截；"
                     "若业务面向未成年人不可及场景，需在运营侧另做限制")
         if settings.COMPLIANCE_DECISIONS_ACK:
@@ -498,7 +498,7 @@ async def _check_membership_products(db=None) -> None:
 app = FastAPI(
     title="通用应用后端 API",
     description="会员、单次/按天权益、微信/支付宝支付、一级直推分销与提现审核",
-    version="7.0.2",
+    version="7.0.3",
     lifespan=lifespan,
     # 安全加固：生产关闭 docs/redoc/openapi，避免匿名公网获取完整 API 地图
     #（含管理端端点与请求/响应结构，等于给攻击者递地图）；非生产保留便于调试。
@@ -507,7 +507,7 @@ app = FastAPI(
     openapi_url=None if _is_prod_env() else "/openapi.json",
 )
 
-# H5 修复：生产环境未配置来源时不放行 *；仅开发环境放开
+# CORS 来源：生产环境未配置来源时不放行 *；仅开发环境放开
 _origins = settings.cors_origins_list
 # 用统一判定：APP_ENV 拼错时若仍按 != "production" 放行 *，跨域白名单就等于没有
 if not _origins and not settings.is_prod_env:
@@ -548,9 +548,9 @@ async def request_id_middleware(request: Request, call_next):
     return response
 
 
-# P3（#28 全局请求体上限）：无上限时攻击者可用超大 body 耗尽内存/带宽（multipart 上传另有
+# 全局请求体上限：无上限时攻击者可用超大 body 耗尽内存/带宽（multipart 上传另有
 # RATE_LIMIT_UPLOAD_PER_MIN 但 body 本身仍可巨大）。
-# M2 修复：原实现是 @app.middleware("http")（BaseHTTPMiddleware），只做了 Content-Length 预检，
+# 原实现是 @app.middleware("http")（BaseHTTPMiddleware），只做了 Content-Length 预检，
 # 注释宣称的「chunked 流式兜底」从未实现——攻击者用 Transfer-Encoding: chunked（不带 Content-Length）
 # 即可绕过预检，让下游 request.body() 把任意大的 body 全量读进内存；且 BaseHTTPMiddleware 下
 # request.body() 会先缓冲整个 body 再交下游，结构上就无法做流式限制。
@@ -563,7 +563,7 @@ class _BodyTooLarge(Exception):
 
 
 class BodySizeLimitMiddleware:
-    """纯 ASGI 请求体上限中间件（M2）。两道防线：
+    """纯 ASGI 请求体上限中间件。两道防线：
     · Content-Length 预检：声明超限直接 413，一个字节都不读；
     · 流式兜底：chunked（无 Content-Length）传输时包装 receive 累计已读字节，超限即断。
     仅拦 POST/PUT/PATCH（GET/DELETE 无 body）；仅当下游真的读取 body 时才触发流式计数，
@@ -767,11 +767,11 @@ async def security_headers(request: Request, call_next):
             "object-src 'none'; "
             "frame-ancestors 'none'"
         )
-    # H1: HSTS 仅生产 HTTPS 部署下生效（开发环境 HTTP 时浏览器会忽略，置了反而锁死本地）。
+    # HSTS 仅生产 HTTPS 部署下生效（开发环境 HTTP 时浏览器会忽略，置了反而锁死本地）。
     # 配置 1 年 + includeSubDomains：首访 HTTPS 后浏览器即拒绝纯 HTTP 资源，防协议降级/中间人。
     if _is_prod_env():
         resp.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
-    # H2: /api/* 响应全部带用户态信息，任何 CDN/代理缓存都会导致跨用户数据泄露。
+    # /api/* 响应全部带用户态信息，任何 CDN/代理缓存都会导致跨用户数据泄露。
     # Vary 头告知代理按 Cookie/Authorization 区分缓存键；no-store 是更硬的兜底，直接禁止落盘。
     if request.url.path.startswith("/api"):
         resp.headers["Cache-Control"] = "no-store"
@@ -782,7 +782,7 @@ async def security_headers(request: Request, call_next):
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
     # 脱敏日志：防止敏感信息泄露。
-    # 【安全审计修复】异常消息本身也要脱敏——请求参数若携带 token/密钥
+    # 异常消息本身也要脱敏——请求参数若携带 token/密钥
     # （支付回调 body、URL query 等），会随 {exc} 原文进入容器日志，
     # 并可能经 AlertHandler 外发到第三方 webhook。
     sanitized_path = sanitize_log(request.url.path)
@@ -879,7 +879,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 async def admin_auth_denied_handler(request: Request, exc: AdminAuthDenied):
     """管理端鉴权失败：HTTP 401 + 既有业务码 6001。
 
-    上线前检查修复：此前该失败以 HTTP 200 返回，nginx 日志/监控/WAF 无法与正常请求区分，
+    上线前检查：此前该失败以 HTTP 200 返回，nginx 日志/监控/WAF 无法与正常请求区分，
     令牌爆破在传输层不可观测。改为 401 后可被统计与告警，响应体仍保持 code/msg/data 口径。
     """
     return JSONResponse(
@@ -888,7 +888,7 @@ async def admin_auth_denied_handler(request: Request, exc: AdminAuthDenied):
     )
 
 
-# 注册路由（统一前缀 /api）。T13：移除遗留 /api/report 旧报告接口，收敛攻击面
+# 注册路由（统一前缀 /api）。移除遗留 /api/report 旧报告接口，收敛攻击面
 app.include_router(auth.router, prefix="/api")
 app.include_router(system.router, prefix="/api")
 app.include_router(order.router, prefix="/api")
@@ -919,19 +919,19 @@ for _entry in registry.plugins.values():
 if not (settings.WEB_ROOT and os.path.isdir(settings.WEB_ROOT)):
     @app.get("/")
     async def root():
-        # P3（#28）：与 /api/server-info 同口径不暴露版本号——精确版本对攻击者是 CVE 指南。
+        # 与 /api/server-info 同口径不暴露版本号——精确版本对攻击者是 CVE 指南。
         return {"code": 0, "msg": "后端服务运行中"}
 
 
 @app.get("/api/server-info")
 async def server_info():
-    # P3：收敛对外暴露面——版本号对攻击者是「CVE 指南」，对用户无感知价值。
+    # 收敛对外暴露面——版本号对攻击者是「CVE 指南」，对用户无感知价值。
     return {"code": 0, "msg": "service running"}
 
 
 @app.get("/health")
 async def health():
-    """L3：对外只返回笼统状态，不暴露 DB/Redis 细节"""
+    """对外只返回笼统状态，不暴露 DB/Redis 细节"""
     return {"code": 0, "msg": "ok", "data": {"status": "healthy"}}
 
 
@@ -960,7 +960,7 @@ if settings.WEB_ROOT and os.path.isdir(settings.WEB_ROOT):
         if full_path == "api" or full_path.startswith("api/"):
             return JSONResponse(status_code=404,
                                 content={"code": 404, "msg": "接口不存在"})
-        # M5（审计）：超长路径在 realpath/拼接时可能触发上游（nginx/uvicorn）层异常，
+        # 超长路径在 realpath/拼接时可能触发上游（nginx/uvicorn）层异常，
         # 先按长度短路；正常 SPA 路由远小于该阈值。
         if len(full_path) >= 4096:
             return JSONResponse(status_code=404, content={"code": 404, "msg": "接口不存在"})

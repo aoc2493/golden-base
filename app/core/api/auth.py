@@ -44,7 +44,7 @@ _REGISTER_WINDOW = 600
 # 不限流即可离线穷举爆破，命中他人设备码就直接接管其账号
 _LOGIN_LIMIT = 20
 _LOGIN_WINDOW = 600
-# M1：设备码格式强校验——h5- + 至少 20 位字母数字（主路径为 CSPRNG 生成的 32 位 hex，
+# 设备码格式强校验——h5- + 至少 20 位字母数字（主路径为 CSPRNG 生成的 32 位 hex，
 # 存量弱熵用户设备码为 base36 亦可匹配），总长不超过 VARCHAR(64)。
 # 拦截 "h5-1" 之类的低熵值，封堵对设备码空间的离线穷举。
 _DEVICE_CODE_RE = re.compile(r"^h5-[A-Za-z0-9]{20,61}$")
@@ -68,9 +68,9 @@ _SIG_LEN = 25
 _STATE_PAYLOAD_BUDGET = _STATE_MAX - _SIG_LEN
 # 前端 buildState() 产出的已经是 base64url（无填充），本身就落在这个字符集里
 _URLSAFE_STATE = re.compile(r"^[A-Za-z0-9_.\-]+$")
-# P1 修复（登录 CSRF）：state 浏览器绑定的 Cookie 名与 Redis key 前缀
+# 登录 CSRF：state 浏览器绑定的 Cookie 名与 Redis key 前缀
 _WX_NONCE_COOKIE = "wx_onc"
-# H1 修复（同步微信资料 CSRF）：与登录用独立 Cookie 名，避免两条流程的 nonce 互相覆盖/误消费
+# 同步微信资料 CSRF：与登录用独立 Cookie 名，避免两条流程的 nonce 互相覆盖/误消费
 _SYNC_NONCE_COOKIE = "wx_sync_onc"
 
 def _state_key(signed: str) -> str:
@@ -89,11 +89,11 @@ def _state_payload(raw: str) -> str:
 
 
 def sign_state(raw: str) -> str:
-    """L12：state 加 HMAC 签名，防篡改邀请码/回跳路径。
+    """state 加 HMAC 签名，防篡改邀请码/回跳路径。
 
     超长时只能裁 payload，绝不能裁签名：原实现由 build_authorize_url 把签好的整串
-    截到 128 字符，等于把 HMAC 尾巴砍掉，回跳后 verify_state 必然失败；而 L12 之后
-    state 校验是登录硬前置，微信内用户会直接被挡在门外（探针实测 7 个真实场景挂 3 个，
+    截到 128 字符，等于把 HMAC 尾巴砍掉，回跳后 verify_state 必然失败；而签名
+    校验成为登录硬前置后，微信内用户会直接被挡在门外（探针实测 7 个真实场景挂 3 个，
     例如 #/report?order_no=... 这类带参数的分享链接）。
     裁掉 payload 尾部最多让前端 parseState 解不出 p/r：回跳后落在首页、邀请码丢失
     （邀请码前端另有 7 天 localStorage 兜底），登录本身不受影响。"""
@@ -115,7 +115,7 @@ def verify_state(signed: str) -> Optional[str]:
     而超长被裁剪过的 payload 又会解出不完整的 UTF-8 序列直接抛异常。
     原实现把「签名有效但解码失败」和「签名被篡改」一并归到 except 里返回 None，
     等于用户只是分享了一个带参数的长链接，回跳后就被判定为授权校验失败、
-    彻底登录不了（L12 之后 state 校验是登录硬前置）。
+    彻底登录不了（state 校验是登录硬前置）。
     安全边界只由 HMAC 比对决定；透传内容由前端 parseState 自行解析，
     解不开会落到首页，邀请码另有 7 天 localStorage 兜底。
     """
@@ -133,7 +133,7 @@ def verify_state(signed: str) -> Optional[str]:
 
 
 async def _register_allowed(request: Request) -> bool:
-    """M3：原子限流（Lua incr+expire），替代先 get 后 incr 的竞态写法"""
+    """原子限流（Lua incr+expire），替代先 get 后 incr 的竞态写法"""
     ip = get_client_ip(request)
     return await redis_rate_limit(redis_client, f"register_limit:{ip}", _REGISTER_LIMIT, _REGISTER_WINDOW)
 
@@ -147,7 +147,7 @@ async def _issue_token(db: AsyncSession, user: User, invite_code):
 
 
 # ============ 邮箱账号密码：pbkdf2_sha256（标准库实现，避免引入新依赖） ============
-# 【安全审计修复】迭代次数 12 万 → 60 万（OWASP 对 PBKDF2-HMAC-SHA256 的现行下限）：
+# 迭代次数 12 万 → 60 万（OWASP 对 PBKDF2-HMAC-SHA256 的现行下限）：
 # 拖库后的离线爆破成本与迭代次数成正比，12 万在当代 GPU 上已不够看。
 # 兼容说明：哈希串里写死了当次迭代数，verify 按串内值派生，存量密码无需重置；
 # 单次登录派生约 0.2~0.4s（hashlib 走 C 实现），登录接口已有 IP 级限流兜底 CPU 面。
@@ -176,15 +176,15 @@ def _verify_password(password: str, stored: str) -> bool:
 
 @router.get("/authorize-url")
 async def authorize_url(request: Request, state: str = Query("", max_length=256), resp: Response = None):
-    """返回微信静默授权链接；L12：state 经后端签名。
-    防登录 CSRF（P1 修复）：签名只能证明 state 由本服务签发，不能证明是「当前用户浏览器」
+    """返回微信静默授权链接；state 经后端签名。
+    防登录 CSRF：签名只能证明 state 由本服务签发，不能证明是「当前用户浏览器」
     发起的——攻击者可自己调本接口拿到合法签名的 state，拼上自己微信的 code 诱骗受害者
     打开，受害者即被登进攻击者账号。修复为 OAuth 标准的浏览器绑定（double-submit）：
     下发授权链接时生成一次性 nonce 同时写入 Redis（state→nonce）与发起方 Cookie，
     回跳登录时两者必须匹配，且登录成功即消费（DEL）防重放。"""
     if not oauth_configured():
         return error(ErrorCode.PARAM_ERROR, "微信网页授权未配置")
-    # L1 修复：匿名端点此前无限流，每次调用都写一个一次性 Redis 键（state 可任意变化），
+    # 匿名端点此前无限流，每次调用都写一个一次性 Redis 键（state 可任意变化），
     # 构成写入放大器。与 wechat-login 同口径加 IP 级限流（30 次/分钟，真人足够）。
     if not await redis_rate_limit(
             redis_client, f"rate:authurl_ip:{get_client_ip(request)}", 30, 60):
@@ -210,13 +210,13 @@ async def authorize_url(request: Request, state: str = Query("", max_length=256)
 @router.post("/wechat-login")
 async def wechat_login(req: WechatLoginRequest, request: Request, db: AsyncSession = Depends(get_db)):
     """微信静默授权登录"""
-    # P3 修复：本接口会触发对微信 code2session 的外部调用（放大器），此前无任何限流。
+    # 本接口会触发对微信 code2session 的外部调用（放大器），此前无任何限流。
     # IP 级 30 次/分钟：正常单用户一次登录只打 1-2 次，阈值宽松不影响真人。
     allowed = await redis_rate_limit(
         redis_client, f"rate:wxlogin_ip:{get_client_ip(request)}", 30, 60)
     if not allowed:
         return error(ErrorCode.RATE_LIMIT, "操作过于频繁，请稍后再试")
-    # L12 + 安全修复：state 必须存在且签名有效，否则不予登录。
+    # state 必须存在且签名有效，否则不予登录。
     # 原实现验签失败只打 warning 仍继续登录，构成 OAuth 登录 CSRF：
     # 攻击者用自己的微信 code 拼出回跳链接诱骗受害者打开，受害者浏览器就会登录到
     # 攻击者账号，其随后填写的出生信息档案、支付与报告全部落入攻击者账号可被读取。
@@ -226,7 +226,7 @@ async def wechat_login(req: WechatLoginRequest, request: Request, db: AsyncSessi
     if verify_state(req.state) is None:
         logger.warning(f"微信登录 state 签名校验失败，已拦截: {req.state[:40]}")
         return error(ErrorCode.PARAM_ERROR, "微信授权校验失败，请关闭页面重新从入口进入")
-    # P1 修复：state 必须与发起授权的浏览器绑定（authorize-url 下发的 Cookie nonce 与
+    # state 必须与发起授权的浏览器绑定（authorize-url 下发的 Cookie nonce 与
     # Redis 登记值匹配），封堵「攻击者的 state + 攻击者的 code」登录 CSRF。
     # Redis 不可用或登记过期时一律拒绝（fail-closed）：宁可让用户重走一次授权，
     # 也不接受无法证明归属的 state。
@@ -243,7 +243,7 @@ async def wechat_login(req: WechatLoginRequest, request: Request, db: AsyncSessi
         return error(ErrorCode.PARAM_ERROR, "微信授权已失效，请关闭页面重新从入口进入")
     session = await code2session(req.code.strip())
     if not session:
-        # T20：code 一次性，刷新回调页会失败，给出明确可恢复提示
+        # code 一次性，刷新回调页会失败，给出明确可恢复提示
         return error(ErrorCode.PARAM_ERROR, "微信授权已失效，请关闭页面重新从入口进入")
     openid = session["openid"]
     unionid = session.get("unionid") or None
@@ -253,12 +253,12 @@ async def wechat_login(req: WechatLoginRequest, request: Request, db: AsyncSessi
         user = (await db.execute(select(User).where(User.unionid == unionid))).scalar_one_or_none()
         if user:
             user.oa_openid = openid
-    # 双向定位（属主决策）：微信标识查无账号、但请求携带已注册设备码，且该设备账号
+    # 双向定位：微信标识查无账号、但请求携带已注册设备码，且该设备账号
     # 尚未绑任何微信标识时，判为同一人——把微信标识并到设备账号上，而不是新建行。
     # 不并的后果是同一人两个 user_id：订单/会员/开票劈成两半，财务永远对不上。
     # 设备账号已绑其他微信（两人共用一台设备）时不并，保持账号分离。
     device_code = (req.device_code or "").strip()
-    # 【安全审计修复 M8】已释放的设备码不得再参与「双向定位/反向补绑」：
+    # 已释放的设备码不得再参与「双向定位/反向补绑」：
     # 它是已被用户主动作废的凭证，重新挂到账号上等于把处置撤销。
     device_ok = bool(_DEVICE_CODE_RE.match(device_code)) \
         and not await is_device_code_released(device_code)
@@ -279,7 +279,7 @@ async def wechat_login(req: WechatLoginRequest, request: Request, db: AsyncSessi
         # oa_openid 唯一约束让后到者抛 IntegrityError → 500，用户只看到「登录失败」。
         # 用 SAVEPOINT 包住 INSERT：撞约束就改读已存在的那条，且不污染外层事务
         # （否则 get_db 退出时的 commit 会连带失败，本次请求彻底发不出 token）。
-        # 与 services/membership.py 的 N3、插件的报告创建同一套路。
+        # 与 services/membership.py 的行锁获取、插件的报告创建同一套路。
         try:
             async with db.begin_nested():
                 db.add(user)
@@ -307,12 +307,12 @@ async def wechat_login(req: WechatLoginRequest, request: Request, db: AsyncSessi
     if user.device_code:
         await identity_svc.record_login_identity(db, user.id, identity_svc.ID_DEVICE, user.device_code)
     await db.flush()
-    # P1 修复：登录成功即消费 state（一次性），防止同一条授权链接被重放
+    # 登录成功即消费 state（一次性），防止同一条授权链接被重放
     try:
         await redis_client.delete(st_key)
     except Exception:
         pass
-    # M4：登录成功仅通过 httpOnly Cookie 下发会话，响应体不再回传 token（防 XSS 从响应体窃取）
+    # 登录成功仅通过 httpOnly Cookie 下发会话，响应体不再回传 token（防 XSS 从响应体窃取）
     resp = JSONResponse(content=success(
         {"user_id": user.id, "is_new": is_new, "auth_type": "wechat"}))
     set_auth_cookie(resp, token, request)
@@ -322,9 +322,9 @@ async def wechat_login(req: WechatLoginRequest, request: Request, db: AsyncSessi
 
 @router.post("/login")
 async def login(req: LoginRequest, request: Request, db: AsyncSession = Depends(get_db)):
-    """兜底登录（外部浏览器）：设备码查找或创建。M2：记录首次登录 IP 用于异常审计"""
+    """兜底登录（外部浏览器）：设备码查找或创建。记录首次登录 IP 用于异常审计"""
     device_code = req.code.strip()
-    # M1：设备码格式强校验（h5- + ≥20 位字母数字），封堵低熵值穷举
+    # 设备码格式强校验（h5- + ≥20 位字母数字），封堵低熵值穷举
     if not _DEVICE_CODE_RE.match(device_code):
         return error(ErrorCode.PARAM_ERROR, "设备码格式错误")
     # 命中已存在用户也必须限流：原实现只对“新建用户”走 _register_allowed，
@@ -332,7 +332,7 @@ async def login(req: LoginRequest, request: Request, db: AsyncSession = Depends(
     if not await redis_rate_limit(redis_client, f"login_limit:{get_client_ip(request)}",
                                   _LOGIN_LIMIT, _LOGIN_WINDOW):
         return error(ErrorCode.RATE_LIMIT, "操作过于频繁，请稍后再试")
-    # M8 的另一半：已解绑的设备码必须在这里就明确拒掉。_release_device_code 会把
+    # 另一半：已解绑的设备码必须在这里就明确拒掉。_release_device_code 会把
     # users.device_code 置空，缺了这道校验，旧码会落到下面「查无用户 → 新建账号」分支，
     # 静默生成一个空账号（用户视角：订单/会员/余额全没了），与 /device/release 的承诺相反。
     # /refresh 与微信绑定路径都查了，设备码主入口不能漏。
@@ -354,7 +354,7 @@ async def login(req: LoginRequest, request: Request, db: AsyncSession = Depends(
         return error(ErrorCode.RATE_LIMIT, "操作过于频繁，请稍后再试")
     user = User(device_code=device_code,
                 last_login_type=identity_svc.ID_DEVICE, last_login_value=device_code)
-    # L2 修复：同一设备码的并发首登（双击/多标签/重试）会同时查不到用户并各自 INSERT，
+    # 同一设备码的并发首登（双击/多标签/重试）会同时查不到用户并各自 INSERT，
     # uk_device_code 唯一约束让后到者抛 IntegrityError → 500。用 SAVEPOINT 包住 INSERT，
     # 撞约束就改读已存在的那条（与上面微信路径同一套路），不污染外层事务。
     is_new = True
@@ -380,13 +380,13 @@ async def login(req: LoginRequest, request: Request, db: AsyncSession = Depends(
 async def refresh_token(req: RefreshRequest, request: Request, db: AsyncSession = Depends(get_db)):
     """刷新 token：设备码即凭证，必须限流且校验格式，否则可被穷举爆破"""
     device_code = req.code.strip()
-    # M1：设备码格式强校验，与 /login 同口径
+    # 设备码格式强校验，与 /login 同口径
     if not _DEVICE_CODE_RE.match(device_code):
         return error(ErrorCode.PARAM_ERROR, "设备码格式错误")
     if not await redis_rate_limit(redis_client, f"refresh_limit:{get_client_ip(request)}",
                                   _LOGIN_LIMIT, _LOGIN_WINDOW):
         return error(ErrorCode.RATE_LIMIT, "操作过于频繁，请稍后再试")
-    # 【安全审计修复 M8】与 /login 同口径：已释放的设备码不再能换会话
+    # 与 /login 同口径：已释放的设备码不再能换会话
     if await is_device_code_released(device_code):
         return error(ErrorCode.NOT_LOGIN, "该设备的登录凭证已失效，请重新进入页面")
     user = (await db.execute(
@@ -427,16 +427,16 @@ async def logout(request: Request,
                  credentials: HTTPAuthorizationCredentials = Depends(HTTPBearer(auto_error=False)),
                  db: AsyncSession = Depends(get_db),
                  user: User = Depends(get_current_user)):
-    """M4：退出登录——拉黑当前 token（不影响其他设备）+ 清除 httpOnly Cookie。
-    R2 回归修复：原实现误用用户级黑名单（会把该用户全部设备一并登出）；
+    """退出登录——拉黑当前 token（不影响其他设备）+ 清除 httpOnly Cookie。
+    退出登录原先误用用户级黑名单（会把该用户全部设备一并登出）；
     且 Cookie 会话（无 Bearer 头）时读不到 token、什么都没拉黑。现从请求头或 Cookie 取当前 token。
 
-    【安全审计修复 M7】撤销失败必须可感知：原实现 `except Exception: pass` 后一律回
+    撤销失败必须可感知：原实现 `except Exception: pass` 后一律回
     「已退出登录」。共享设备上用户据此认为会话已失效，实际 token 仍可用到自然过期，
     服务端日志连一条错误都没有。现如实回传 revoked=false 与明确文案。
 
-    【安全审计修复（双凭证）】Bearer 头与 httpOnly Cookie 可能同时存在且是**两个不同的
-    token**（例如 H5 走 Cookie、前端又用旧 token 打了 Authorization）。原实现二选一，
+    Bearer 头与 httpOnly Cookie 可能同时存在且是**两个不同的
+    token**（例如前端走 Cookie、又用旧 token 打了 Authorization）。原实现二选一，
     只撤销其中一个，另一个在登出后依然有效。现两个都撤销。
     """
     tokens: list[str] = []
@@ -473,7 +473,7 @@ async def logout(request: Request,
 async def _release_device_code(user: User, db: AsyncSession) -> tuple[bool, str]:
     """解绑当前账号的设备码（设备登录凭证立即失效）。
 
-    【安全审计修复 M8】设备码是外部浏览器下的长期凭证（无口令、无过期、登出不影响）。
+    设备码是外部浏览器下的长期凭证（无口令、无过期、登出不影响）。
     此前没有任何处置手段：退出登录后该码仍指向原账号，任何人打开页面即进入；
     若只把 users.device_code 置空，旧码又会走 /login 的「查无用户 → 新建账号」
     分支，静默生成一个全新空账号（用户视角：订单/会员/余额全部消失）。
@@ -553,7 +553,7 @@ async def profile_authorize_url(request: Request, user: User = Depends(get_curre
                                 resp: Response = None):
     """下发「同步微信头像昵称」的 snsapi_userinfo 授权链接（需登录）。
 
-    H1 修复（同步微信资料 CSRF）：与登录流程同款 double-submit 浏览器绑定——
+    同步微信资料 CSRF：与登录流程同款 double-submit 浏览器绑定——
     下发链接时生成一次性 nonce 同时写 Redis（state→nonce）与发起方 Cookie，回跳同步时
     两者必须匹配且成功即消费。此前 state 是全站恒定值、不登记 nonce，攻击者可用自己的
     code 诱导受害者打开链接，把攻击者微信绑到受害者账号，再走微信登录完成账号接管。"""
@@ -595,7 +595,7 @@ async def sync_wechat_profile(req: SyncWechatProfileRequest, request: Request,
         redis_client, f"rate:syncprofile:{user.id}:{get_client_ip(request)}", 5, 60)
     if not allowed:
         return error(ErrorCode.RATE_LIMIT, "操作过于频繁，请稍后再试")
-    # H1 修复（同步微信资料 CSRF）：state 必须由 profile-authorize-url 签发
+    # 同步微信资料 CSRF：state 必须由 profile-authorize-url 签发
     # （payload == syncprofile 标记，区别于登录 state），且其 nonce 与当前浏览器 Cookie
     # 匹配——fail-closed，任一环节缺失即拒。封堵「攻击者的 code 被绑到受害者账号」。
     if not req.state:
@@ -645,7 +645,7 @@ async def sync_wechat_profile(req: SyncWechatProfileRequest, request: Request,
         await identity_svc.record_login_identity(db, user.id, identity_svc.ID_OA_OPENID, openid)
     nick = (info.get("nickname") or "").strip()
     if nick:
-        # M3③（第五十七/五十八条）：微信昵称同步后对他人可见，落库前过敏感词。与 user.py 改名
+        # 第五十七/五十八条：微信昵称同步后对他人可见，落库前过敏感词。与 user.py 改名
         # 不同——昵称来自微信、且本流程还含头像/openid 绑定，命中敏感词时只跳过昵称落库（保留
         # 原值）+ 告警，不阻断整个同步；否则用户可「在微信改违规昵称→同步」绕过改名入口的检测。
         sw = await compliance_svc.check_sensitive(db, nick[:50])
@@ -660,7 +660,7 @@ async def sync_wechat_profile(req: SyncWechatProfileRequest, request: Request,
         if avatar_url:
             user.avatar_url = avatar_url
     await db.flush()
-    # H1：同步成功即消费 state（一次性）并清除绑定 Cookie，防同一授权链接被重放
+    # 同步成功即消费 state（一次性）并清除绑定 Cookie，防同一授权链接被重放
     try:
         await redis_client.delete(st_key)
     except Exception:
@@ -676,7 +676,7 @@ async def _save_remote_avatar(url: str) -> Optional[str]:
 
     安全边界（SSRF 加固）：
      · 仅允许 http/https，不跟随重定向（防重定向绕过域名/IP 校验）；
-     · 【安全审计修复 P2-2】解析一次、校验全部解析结果后，把连接钉死在校验过的 IP 上：
+     · 解析一次、校验全部解析结果后，把连接钉死在校验过的 IP 上：
        旧实现校验用 socket.getaddrinfo、请求却由 httpx 另行二次解析，恶意域名可用短 TTL
        在两次解析间切换（DNS rebinding/TOCTOU）先给安全 IP、真请求时指向内网；
        现在 https 仍按原域名做 SNI 与证书主机名校验（连接按 IP、验证按域名，不降低 TLS 强度），
@@ -800,7 +800,7 @@ async def email_register(req: EmailRegisterRequest, request: Request,
         except Exception:
             pass
 
-    # 【安全审计修复】账号枚举：原实现回「该邮箱已注册，请直接登录」，直接把
+    # 账号枚举：原实现回「该邮箱已注册，请直接登录」，直接把
     # 「某邮箱是否在本站注册过」变成一次请求即可确认的信息（撞库字典先筛一遍、
     # 骚扰/钓鱼定向）。与同文件的 /password/reset-request 同口径：命中已存在账号
     # 只在日志留痕，对外给中性文案。
@@ -904,7 +904,7 @@ async def email_send_code(req: SendEmailCodeRequest, request: Request,
     email = (req.email or "").strip().lower()
     if not _EMAIL_RE.match(email):
         return error(ErrorCode.PARAM_ERROR, "邮箱格式不正确")
-    # 【体验走查修复 P0】邮件通道未接入时绝不能把验证码写进 Redis。
+    # 邮件通道未接入时绝不能把验证码写进 Redis。
     # register 的口径是「此前已为该邮箱下发过验证码则必须提供且匹配」：一旦落了 regcode: 键，
     # 该邮箱在 10 分钟内怎么提交都只会收到「验证码无效或已过期」，而邮件永远不会到达——
     # 一个本来可用的注册流程被用户自己点一下按钮堵死，且无任何自救入口。

@@ -1,4 +1,4 @@
-"""A6：个人信息处理同意的留痕、查询与撤回（《个人信息保护法》第十五、十六条）。
+"""个人信息处理同意的留痕、查询与撤回（《个人信息保护法》第十五、十六条）。
 
 为什么单独一个模块、而不是塞进 distribution_compliance：那张 compliance_consents 表原先
 只承载分销文书（承诺书 / 支付前免责勾选 / 规则变更确认），而「撤回同意」是面向全体用户的
@@ -33,7 +33,7 @@ DOC_COMMITMENT = dc.DOC_COMMITMENT                # 《合规推广承诺书》
 DOC_PAYMENT_DISCLAIMER = dc.DOC_PAYMENT_DISCLAIMER  # 支付前免责与虚拟商品规则确认
 DOC_RULE_CHANGE = dc.DOC_RULE_CHANGE              # 推广规则重大不利变更确认
 
-# A8：年龄门槛与未成年人保护（services/minor_guard）。三类留痕共用本表，但语义不同：
+# 年龄门槛与未成年人保护（services/minor_guard）。三类留痕共用本表，但语义不同：
 #   adult_declaration  成年声明（事实声明，不可撤回：撤回等于「我刚才没说过自己多大」）
 #   guardian_consent   不满十四周岁未成年人的监护人同意（个保法第三十一条，可撤回）
 #   third_party_bio    填写他人出生信息前的告知与合法性基础承诺（可撤回，按版本号判）

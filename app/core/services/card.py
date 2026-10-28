@@ -1,4 +1,4 @@
-"""卡券（渠道批发卡密）服务 —— 接入算法 H5 的版本
+"""卡券（渠道批发卡密）服务 —— 接入算法类 H5 前端的版本
 
 ================= 接入时必须知道的三个关键点 =================
 
@@ -321,7 +321,7 @@ async def redeem(db: AsyncSession, raw_code: str, user_id: int) -> dict:
     card = (await db.execute(
         row_lock(select(CardCode).where(CardCode.code == code))
     )).scalar_one_or_none()
-    # 【安全审计 M2：侧信道加固】以下失败分支对外文案统一为「卡券无效」。原来的
+    # 以下失败分支对外文案统一为「卡券无效」。原来的
     # 细分文案（不存在/已兑换/已失效/已过期）等于向探测者免费提供状态 oracle：
     # 拿到部分泄露码的攻击者无需真正兑换即可零成本探明每张码的当前状态，
     # 进而筛出「unused=值得尝试、used=原码可能被渠道复投」的目标。卡密空间
@@ -351,7 +351,7 @@ async def redeem(db: AsyncSession, raw_code: str, user_id: int) -> dict:
     if not is_card_sku(prod):
         raise CardRedeemError("该卡券对应的商品已下架或不可用，请联系客服")
 
-    # M4：会员卡降档前置校验，必须在建单/发放之前 —— 这样抛错时整笔兑换事务回滚，
+    # 会员卡降档前置校验，必须在建单/发放之前 —— 这样抛错时整笔兑换事务回滚，
     # 卡密仍是 unused（用户不会既丢档位又白扔一张卡）。
     # grant_membership 内的降档保护是兜底（它管的是「数据不被降档」），此处管的是
     # 「卡不被白白消耗」，两者缺一不可。
@@ -402,7 +402,7 @@ async def redeem(db: AsyncSession, raw_code: str, user_id: int) -> dict:
         # 先提交，用户凭空丢掉一张卡的时长 —— 故对命中的那一行加行锁。
         base_expire = await ent_svc.max_timepass_expire(db, user_id, now=now, for_update=True)
         tp_stacked = base_expire > now
-        # 安全审计修复（卡券 × 支付回收口径）：首兑与顺延都落一条**属于本单**的
+        # 首兑与顺延都落一条**属于本单**的
         # 独立权益行。原实现顺延只改旧行，而旧行写死挂在**另一张卡的订单**上：
         #   ① 本兑换单名下没有任何权益行 → ent_svc.revoke_by_order(本单) 收不回，
         #      客服与审计也无法按订单核对这张卡究竟给了多少时长；
@@ -513,8 +513,7 @@ async def auto_issue_for_order(db: AsyncSession, order) -> Optional[CardCode]:
     """
     if not order or not order.order_no or not order.sku_code:
         return None
-    # 仅真实付费单发卡，判定与四条退款路径的 has_real_payment 完全统一（安全审计
-    # 修复）：卡券兑换单（0 元权益载体）、会员免费解读单、历史 0 元/无资金渠道单
+    # 仅真实付费单发卡，判定与四条退款路径的 has_real_payment 完全统一：卡券兑换单（0 元权益载体）、会员免费解读单、历史 0 元/无资金渠道单
     # 都不是购买行为，再发一张等于凭空造资产。原实现手写渠道黑名单（card/member），
     # 漏掉金额<=0 等无真实资金流入的订单，且与退款资格口径漂移。
     if not has_real_payment(order):

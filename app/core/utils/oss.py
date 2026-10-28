@@ -1,6 +1,6 @@
 """
 腾讯云 COS 对象存储（异步包装，避免阻塞事件循环）
-H11 修复：原阿里云 OSS 替换为腾讯云 COS，与用户服务器/存储桶保持一致
+对象存储用腾讯云 COS；桶名/Region/CDN 域名全部由配置提供，代码里不预设任何真实桶
 接口保持不变：upload_avatar / upload_feedback_image
 """
 import io
@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 _EXT_BY_FORMAT = {"JPEG": "jpg", "PNG": "png", "WEBP": "webp"}
 _CT_BY_FORMAT = {"JPEG": "image/jpeg", "PNG": "image/png", "WEBP": "image/webp"}
 
-# L26：解压炸弹防线。上传接口的 2MB/5MB 上限约束的是「压缩后字节数」，对像素数毫无约束：
+# 解压炸弹防线。上传接口的 2MB/5MB 上限约束的是「压缩后字节数」，对像素数毫无约束：
 # 实测一张 6000×6000 的纯色 PNG 压缩后只有 116.8 KB（约 3322 字节/百万像素），解码后的
 # 像素缓冲却是 108,000,000 字节（103 MB）—— 放大 903 倍，而这里的输出目标只有
 # 200×200 / 1080×1080。也就是说「上限管的是输入，被吃掉的是输出」。
@@ -78,13 +78,13 @@ class COSService:
             self.client = None
 
     def _compress_image(self, file_bytes: bytes, max_size: tuple = None, quality: int = 85):
-        """压缩图片（CPU密集，在线程池执行）。M13：PIL 无法解析/压缩时返回 None，拒绝原样上传。
+        """压缩图片（CPU密集，在线程池执行）。PIL 无法解析/压缩时返回 None，拒绝原样上传。
         返回 (压缩后字节, 真实输出格式)，供调用方推导扩展名与 ContentType。"""
         try:
             img = Image.open(io.BytesIO(file_bytes))
             img.verify()  # 校验图片完整性，损坏/伪造文件直接抛异常
             img = Image.open(io.BytesIO(file_bytes))  # verify 后需重新打开
-            # L26：解码前的最后一道闸。upload.py 的 _validate 已按声明尺寸拦过一次，
+            # 解码前的最后一道闸。upload.py 的 _validate 已按声明尺寸拦过一次，
             # 这里是防御纵深 —— 任何绕过上传校验直接调用压缩的路径同样不能解码炸弹。
             # 必须在 thumbnail() 之前：它内部会 load()，那一刻整幅原尺寸像素就进内存了。
             w, h = img.size
@@ -128,7 +128,7 @@ class COSService:
         if not self.client:
             return None
         packed = await asyncio.to_thread(self._compress_image, file_bytes, max_size, 85)
-        if not packed:  # M13：压缩/校验失败拒绝上传
+        if not packed:  # 压缩/校验失败拒绝上传
             return None
         compressed, fmt = packed
         ext = _EXT_BY_FORMAT.get(fmt, "jpg")

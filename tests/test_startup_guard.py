@@ -93,11 +93,11 @@ async def test_redis_check_skipped_outside_production(monkeypatch):
 
 
 def test_fail_open_redis_is_loud_in_production(monkeypatch, caplog):
-    """REDIS_FAIL_CLOSED=false 属主的可用性取舍，不阻断启动，但每次启动都要以 ERROR 留痕。"""
+    """REDIS_FAIL_CLOSED=false 运营方的可用性取舍，不阻断启动，但每次启动都要以 ERROR 留痕。"""
     _prod_ready(monkeypatch)
     monkeypatch.setattr(settings, "PAYMENT_MOCK", False, raising=False)
     monkeypatch.setattr(settings, "REDIS_FAIL_CLOSED", False, raising=False)
-    _startup_check()  # 不阻断（属主取舍），只要求留痕
+    _startup_check()  # 不阻断（运营方取舍），只要求留痕
     assert "REDIS_FAIL_CLOSED" in caplog.text
 
 
