@@ -174,7 +174,15 @@ def solar_of(birth_date, calendar_type: str = "solar") -> Optional[date]:
     if str(calendar_type or "solar").strip().lower() != "lunar":
         return d
     try:
-        return _lunar_to_solar_cached(d.year, d.month, d.day)
+        converted = _lunar_to_solar_cached(d.year, d.month, d.day)
+        if converted is not None:
+            return converted
+        # 钩子存在但返回 None = 没有任何插件提供农历换算（开源骨架里的 demo 插件即如此）。
+        # 与抛异常走同一条退回路径，否则本函数docstring 承诺的「退回按公历 + 留 WARNING」
+        # 落不了地：返回 None 会让周岁变成「无法推算」，门槛按性质处理时要么误拦成年人、
+        # 要么静默放过，且日志里查不到任何线索。
+        logger.warning(f"[年龄门槛] 无插件提供农历换算，退回按公历推算 birth={_mask_birth(birth_date)}")
+        return d
     except Exception as e:  # pragma: no cover - 依赖 ephem 的边界情形
         logger.warning(f"[年龄门槛] 农历转公历失败，退回按公历推算 birth={_mask_birth(birth_date)} err={e}")
         return d
