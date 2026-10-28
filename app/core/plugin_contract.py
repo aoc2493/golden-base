@@ -17,12 +17,20 @@ from dataclasses import dataclass, field
 from typing import Any, Optional, Protocol, runtime_checkable
 
 # 计费时机
+# 【接线状态】core 目前只在「下单/支付」这一处计费：services/fulfillment.py 按 product_type
+# 与 delivery 分流发放，没有任何代码读 billing_model。因此 BILLING_RUNTIME 只是声明位，
+# 设为它不会让每次调用自动扣额（运行期额度模型见 services/quota.py，尚未接进端点）。
 BILLING_ORDER = "order"      # 在下单 / 支付链路计费（一份内容一次，交付物可缓存）
-BILLING_RUNTIME = "runtime"  # 运行期每次调用扣一次额度（实时调用型）
+BILLING_RUNTIME = "runtime"  # 运行期每次调用扣一次额度（声明位，core 未消费）
 
 # 交付形态
+# 【接线状态】core 只读一处：services/fulfillment.order_delivers_report 判 delivery ==
+# DELIVERY_REPORT（决定「交付痕迹是否落在 reports 表」，进而决定自助退款判据与报告自愈）。
+# 履约的实际发放分支看的是 orders.product_type（membership/single/tool_day/report），
+# 不是本枚举。DELIVERY_LIVE 与 DELIVERY_NONE 都没有分支消费——「实时拉取+缓存」由插件
+# 自己在钩子里实现，设成 LIVE 不会让 core 替你缓存。
 DELIVERY_REPORT = "report"   # 支付后建报告行，后台异步生成（reports 表）
-DELIVERY_LIVE = "live"       # 结果实时拉取并缓存（如 result_cache），经权益门禁返回
+DELIVERY_LIVE = "live"       # 结果实时拉取并缓存（声明位，core 不代为实现）
 DELIVERY_NONE = "none"       # 无独立交付物（免费工具 / 仅发放会员或额度）
 
 
@@ -54,6 +62,8 @@ class Capability:
     cost_per_call_cents: int = 0               # 单次上游成本（分），用于预算与防击穿
     daily_budget_cents: int = 0                # 该能力每日上游成本硬上限（分），0=不限（仅零成本可用）
     # 下单时是否依赖「前置计算缓存」（如先计算再购买解读）
+    # 【接线状态】core 不读该字段：依赖前置缓存的下单校验由插件在 prepare_order 里自查
+    # （api/order.py 只按 result_ref_id 是否解析出 ResultCache 行来决定能否下单）。
     requires_cache: bool = False
     free: bool = False                         # 免费工具（不核销、不可售）
 

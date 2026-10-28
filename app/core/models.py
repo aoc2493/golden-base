@@ -51,7 +51,7 @@ class User(Base):
     # 本两列记录「最近一次登录用的标识」，订单创建时快照进 orders.login_id_*，
     # 即使日后标识变更/账号合并，历史订单与开票仍能双向回溯核对。
     last_login_type = Column(String(16), nullable=True, comment="最近登录标识类型 device/oa_openid/mp_openid/unionid")
-    last_login_value = Column(String(64), nullable=True, comment="最近登录标识值")
+    last_login_value = Column(String(255), nullable=True, comment="最近登录标识值（邮箱可达 255，与 schemas 同宽）")
     created_at = Column(DateTime, default=datetime.now, server_default=func.now())
 
 
@@ -105,6 +105,12 @@ class Favorite(Base):
     因此收藏行自带 title/sub 展示快照与 payload 业务快照，源被软删/
     物理缺失时收藏页仍能展示信息；源为软删（行保留）时仍可打开。"""
     __tablename__ = "favorites"
+    # 同一条目每人只能收藏一次：唯一约束是「重复收藏」的唯一硬保证。
+    # 缺它时双击/并发会写进两行，而 api/favorite.py 的查重用 scalar_one_or_none，
+    # 读到两行即抛 MultipleResultsFound → 该条目此后每次收藏都 500。
+    __table_args__ = (
+        UniqueConstraint("user_id", "item_type", "item_id", name="uk_favorite_item"),
+    )
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     user_id = Column(BigInteger, nullable=False)
     item_type = Column(String(16), nullable=False, comment="插件登记的收藏类型")
@@ -136,7 +142,10 @@ class Order(Base):
     __table_args__ = (
         # 用户侧「我的订单」与后台列表按 user_id 过滤；关单/查单/对账任务按
         # (status, created_at) 扫描。orders 是增长最快的一张表，缺索引即全表扫描。
-        Index("ix_orders_user_id", "user_id"),
+        # user_id 与 created_at 合成一条：列表是 WHERE user_id=? ORDER BY created_at DESC
+        # LIMIT n，单列 user_id 索引能定位但要回表再 filesort；复合索引按序直接取前 n 行。
+        # 最左前缀仍是 user_id，所以只按 user_id 过滤的查询照用，无需再留单列索引。
+        Index("ix_orders_user_created", "user_id", "created_at"),
         Index("ix_orders_status_created", "status", "created_at"),
     )
     id = Column(BigInteger, primary_key=True, autoincrement=True)
@@ -159,7 +168,7 @@ class Order(Base):
     # 注销会清空 users 表身份列、账号合并会改映射，但订单/开票追踪不能随之失真，
     # 故在创建订单时把「当时登录的是哪个标识」固化下来，财务核对可双向回溯。
     login_id_type = Column(String(16), nullable=True, comment="下单时登录标识类型快照")
-    login_id_value = Column(String(64), nullable=True, comment="下单时登录标识值快照")
+    login_id_value = Column(String(255), nullable=True, comment="下单时登录标识值快照（与 users.last_login_value 同宽）")
     paid_at = Column(DateTime, nullable=True)
     pay_url = Column(String(500), nullable=True)
     pay_trade_no = Column(String(64), nullable=True)

@@ -3,13 +3,16 @@
 FastAPI + H5 通用应用底座：登录、支付、会员、卡券、分销、权益核销、结果缓存、
 后台管理、部署基线全部内置，业务能力以插件形式接入。
 
-> **core 零业务词**：`app/core/` 不认识任何具体业务；新增业务 = 新增
-> `app/plugins/<your-biz>/` 一个目录，core 与 `main.py` 一行不改。
+> **core 不含业务逻辑**：`app/core/` 里没有垂直业务的规则与内容生成逻辑，业务能力经
+> `app/plugins/<your-biz>/` 的 manifest + 钩子接入，新增业务不必改 core 与 `main.py`。
+> 已知例外（可审计）：会员规则、合规告知等中文文案在 core 里给了默认值，
+> 正式业务应经 `system_configs`（membership_rules / distribution_rules）按键覆盖，
+> 而不是改 core 源码。
 > 仓库自带 `app/plugins/demo/` 作为最小示例，跑通「登录 → 下单 → 支付 → 权益 → 调用」全链路。
 
 ## 特性
 
-- **两种计费模型**：下单型（一份内容一次）/ 运行期扣额（每次调用）
+- **下单型计费**：一份内容一次；会员周期额度模型（总池 + 单工具单日上限）已内置统计与判定
 - **一个权益账户**：会员到期、单次权益、卡券、时长卡统一记账
 - **真实支付接入**：微信支付 V3（H5/JSAPI）、支付宝手机网站支付，回调验签 + 幂等 + CAS 原子履约
 - **分销合规**：一级直推、等级晋升、月度阶梯、提现审核、敏感词与推广资格考试
@@ -76,10 +79,15 @@ uvicorn app.main:app --reload
 pytest
 ```
 
-测试用内存 SQLite，不依赖 MySQL / Redis / 支付凭据。`tests/test_demo_flow.py`
-覆盖完整购买链路与越权保护；`tests/test_schema_consistency.py` 逐表逐列比对
-`sql/init.sql` 与 ORM（含索引覆盖），`tests/test_security_hardening.py` 锁住
-请求头注入、图片地址白名单、CSRF 来源判定等已修复的缺口。
+测试用内存 SQLite（并发抢占那几个用例用临时文件库，因为内存库的 StaticPool 只有一条连接，
+测不出「提交后才可见」），不依赖 MySQL / Redis / 支付凭据。按链路分工：`test_demo_flow` 走完整
+购买链路与越权保护；`test_membership_fulfillment` 锁会员权益顺延；`test_payment_idempotent`、
+`test_refund_state`、`test_concurrent_claims` 验重复回调下的抢占语义（履约权与退款权都靠带条件的
+原子 UPDATE 抢，抢不到就幂等返回）；`test_invoice_guard` 钉住开票资格判据与退款联动（已退款不开票、
+一单一票靠唯一约束而不是先查后插）；`test_guards_wired` 检查「文档里承诺的安全开关确实接在代码上」；
+`test_startup_guard` 覆盖生产启动自检（含 Redis 连通性门禁）；`test_schema_consistency` 逐表逐列比对
+`sql/init.sql` 与 ORM（含索引覆盖）；`test_security_hardening` 锁住请求头注入、图片地址白名单、
+CSRF 来源判定等已修复的缺口。
 
 存量库升级不要重跑 `init.sql`，按顺序执行 `sql/migrations/*.sql`（幂等）；后端启动时
 还会核对一次表结构，生产环境缺表/缺列会直接拒绝启动并指名缺什么。
@@ -94,7 +102,7 @@ CI（`.github/workflows/ci.yml`）四道门禁全部阻断合并：`ruff check .
 app/
 ├─ main.py                 # 入口：挂 core 路由 + 自动发现插件路由
 ├─ config.py               # 全部配置项（真值走环境变量）
-├─ core/                   # 底盘：零业务词
+├─ core/                   # 底盘：不含垂直业务逻辑
 │  ├─ plugin_contract.py   # 插件契约：Capability / 钩子
 │  ├─ api/                 # auth user order payment membership entitlement ...
 │  ├─ services/            # 会员 / 权益 / 履约 / 分销 / 发票 / 卡券

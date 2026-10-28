@@ -149,8 +149,11 @@ class Settings(BaseSettings):
     TENCENT_SMS_SIGN_NAME: str = ""
     TENCENT_SMS_TEMPLATE_ID: str = ""
     # 业务
-    # 结果缓存复用开关：True=同参数在缓存期内命中即复用（省第三方付费调用，生产默认）；
-    # False=测试阶段每次都真实调用第三方接口，仍写入记录以保留 cache_id（报告/下单链路依赖）
+    # 【未接线·core 不消费这两个键】结果缓存的「复用判定」属第三方调用策略，只有真正调
+    # 外部接口的业务插件才有权决定同参数是否复用；core 侧只做两件与它们无关的事：
+    # tasks/scheduler.py 按 result_cache.expire_at 清理过期行、api/user.py 随账号注销删除。
+    # 待接线说明：插件若需要统一的复用口径，应在此接入点读取本开关并写 expire_at，
+    # 否则不要依赖它们——现在改这两个值不改变任何行为。
     RESULT_CACHE_ENABLED: bool = True
     RESULT_CACHE_DAYS: int = 30
     ORDER_TIMEOUT_MINUTES: int = 30
@@ -223,9 +226,10 @@ class Settings(BaseSettings):
     INVOICE_ITEM_NAME: str = "*信息技术服务*信息系统服务费"
     # 前端静态资源目录（同源托管，前端纯展示、不存数据）；留空则不托管（生产由 nginx 提供）
     WEB_ROOT: str = ""
-    # 是否播种垂直业务商品（由具体业务插件声明的 SKU）。
-    # 通用底座默认关闭——启动即写入某个垂直业务的商品，等于替所有使用者预设了业务形态。
-    # 需要预置垂直业务商品时置 true，由对应插件的种子逻辑写入。
+    # 【未接线·无代码读取本键】原意是「默认不替使用者播种垂直业务商品」，但实际种子
+    # 只有 main._seed_base_data 一处（播会员档位），插件自己的 seed_data 钩子无条件执行，
+    # 因此这个开关从未生效。要控制插件商品的播种请在插件的 seed_data 内自行判定，
+    # 别改本键——改 true/false 都不改变任何行为。
     SEED_VERTICAL_PRODUCTS: bool = False
     # M3①（第五十六条第3款）：支付前免责勾选的服务端闸门开关。
     # 此前 DOC_PAYMENT_DISCLAIMER 只由前端写留痕、下单路径不校验（不勾也能付款）。
@@ -243,6 +247,13 @@ class Settings(BaseSettings):
     # 档位名，前端会员中心与购买页展示用
     # 档位名属业务侧文案，底座只给中性默认值；垂直业务可覆盖。
     MEMBERSHIP_TIER_NAME: dict = {"month": "月卡会员", "year": "年卡会员", "lifetime": "终身会员"}
+    # 档位 SKU 单一来源：既是 _seed_base_data 播种的商品码，也是 membership.level_of_sku
+    # 的反查兜底。此前种子钩子把 vip_month/vip_year/vip_lifetime 写死在 main.py 里，而
+    # level_of_sku 只认插件 manifest.membership_skus——接入的业务插件不声明会员档时，
+    # 用户买下底座档位会在履约处抛 ValueError(非会员SKU)：钱已收、会员没到、订单卡住。
+    # 垂直业务若用别的码，在插件 manifest 声明 membership_skus（优先于本表）并覆盖本表。
+    MEMBERSHIP_TIER_SKUS: dict = {"month": "vip_month", "year": "vip_year",
+                                  "lifetime": "vip_lifetime"}
     # 额度模型：周期总额度为各能力共享的一个总池；单能力单日上限独立计；
     # period_days 为额度周期长度（终身每365天滚动重置）。
     # archive_limit 是历史键名（各档位可保存的条目数上限，0=不限），会员规则文案与
@@ -335,6 +346,9 @@ class Settings(BaseSettings):
     # 叠加一层按 IP 的全局限流，防止一次性打爆第三方付费 API 预算。
     # 仅叠加在用户级限流之上；配合 TRUST_PROXY_HEADERS=true（nginx 反代覆写 X-Real-IP）时
     # 按真实公网 IP 计数，直连部署则按 TCP 对端 IP 计数。
+    # 【未接线·无代码读取本键】上面那段「按 IP 叠一层全局限流」的设计尚未落地：
+    # 现有限流都是按端点各自取 RATE_LIMIT_* 键，没有任何调用点读这个总闸。
+    # 待接线说明：在计费类路由上以 f"tp:{ip}" 为键统一计数后再启用，否则别依赖它。
     RATE_LIMIT_TP_GLOBAL_PER_MIN: int = 60     # 每 IP 每分钟第三方计费接口调用总上限
     # 会员配额不在此配置：已由 services/quota.py 的 v2 模型统一承接
     # （各能力共享周期总池 + 单能力单日上限，额度取自 membership.quota_conf(level)）。

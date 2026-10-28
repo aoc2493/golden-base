@@ -90,6 +90,7 @@ service = YourService()
 | `on_refund` | 退款成功 | 回收业务数据 |
 | `seed_data` | 启动 | 幂等写入商品行 |
 | `generation_task` | 报告型能力 | 返回后台生成协程 |
+| `lunar_converter` | 农历生日换算 | 返回 f(y,m,d)->date；不提供（或返回 None）时农历档案退回按公历解读并留 WARNING |
 | `derive_check_biz_key` | 权益校验 | 服务端从 sides 派生 biz_key |
 | `on_user_erase` | 注销 | 清理插件专属数据 |
 | `favorite_types` / `describe_favorite` / `favorite_alive` | 收藏 | 插件自有收藏类型 |

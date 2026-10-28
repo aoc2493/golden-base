@@ -27,9 +27,9 @@ STATUS_TEXT = {
     "pending": "待支付", "completed": "已完成", "refunded": "已退款",
     "refund_pending": "退款中", "expired": "已过期", "cancelled": "已取消",
 }
-# L22/L24：交付不由 reports 表跟踪的 SKU 统一登记在 fulfillment.NO_REPORT_DELIVERY_SKUS，
-# 本文件的自助退款判据与插件的报告自愈守卫共用那一份，不在这里另立集合：
-# 两处要回答的是同一个事实问题（内容交付痕迹是否在 reports 表），答案必须一致。
+# L22/L24：「这一单的交付痕迹是否在 reports 表」由 fulfillment.order_delivers_report 单点判定，
+# 本文件的自助退款判据与插件的报告自愈守卫都调它，不在这里另立集合：
+# 两处要回答的是同一个事实问题，答案必须一致。
 # 新增同类 SKU 只需改登记处那一行。
 
 
@@ -217,9 +217,9 @@ async def create_order(req: OrderCreateRequest, request: Request,
             ResultCache.id == req.result_ref_id,
             ResultCache.user_id == user.id))).scalar_one_or_none()
         if not cobj:
-            return error(ErrorCode.CACHE_NOT_FOUND, "测算数据不存在，请重新填写")
+            return error(ErrorCode.CACHE_NOT_FOUND, "前置计算结果不存在，请重新填写")
         if cobj.expire_at < datetime.now():
-            return error(ErrorCode.CACHE_EXPIRED, "测算数据已过期，请重新填写")
+            return error(ErrorCode.CACHE_EXPIRED, "前置计算结果已过期，请重新填写")
         input_snapshot = cobj.input_data
         if isinstance(input_snapshot, str):
             input_snapshot = json.loads(input_snapshot)
@@ -524,7 +524,7 @@ async def apply_refund_api(req: RefundRequest, request: Request,
     """申请退款（单次解读/双人内容：7天内且未查看）。N2/H4：区分成功/处理中/失败三态
 
     L22：可退范围必须与 /order/list、/order/{id} 的 can_refund 同一口径。
-    交付不由 reports 跟踪的 SKU（NO_REPORT_DELIVERY_SKUS，如实时测算）一律走客服处理。"""
+    交付不落 reports 表的 SKU（见 fulfillment.order_delivers_report）一律走客服处理。"""
     refund_enabled = await get_bool(db, "refund_enabled", True)
     if not refund_enabled:
         return error(ErrorCode.REFUND_DISABLED, "退款功能暂未开放")
@@ -596,7 +596,7 @@ async def apply_refund_api(req: RefundRequest, request: Request,
         return success({"status": "processing", "msg": "退款处理中，请留意支付平台通知"})
     else:
         refund.status = "failed"
-        refund.fail_reason = result.msg or "支付平台退款接口调用失败"
+        refund.fail_reason = (result.msg or "支付平台退款接口调用失败")[:200]
         # 平台未受理：把抢占时置的 refund_pending 还原为 completed。
         # 必须用 Core UPDATE：ORM 实例内存里的 status 仍是 "completed"，
         # 直接赋值相同值不会生成 UPDATE，库里会错误地停在 refund_pending。

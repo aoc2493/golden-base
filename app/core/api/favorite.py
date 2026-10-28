@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from app.core.database import get_db
 from app.core.models import User, Order, Report, Favorite
@@ -66,9 +67,11 @@ async def favorite_add(req: FavoriteAddRequest,
                        db: AsyncSession = Depends(get_db),
                        user: User = Depends(get_current_user)):
     """收藏。快照一律服务端取（前端传什么信什么等于开放伪造展示内容的入口）；重复收藏幂等。"""
+    # limit(1)+first()：存量库在跑 0003 去重前可能已有重复行，用 scalar_one_or_none
+    # 会在重复行上抛 MultipleResultsFound，让「已收藏过的条目」再也加不进去。
     exist = (await db.execute(select(Favorite).where(
         Favorite.user_id == user.id, Favorite.item_type == req.item_type,
-        Favorite.item_id == req.item_id))).scalar_one_or_none()
+        Favorite.item_id == req.item_id).limit(1))).scalars().first()
     if exist:
         return success({"id": exist.id}, msg="已在收藏中")
     total = (await db.execute(select(Favorite.id).where(
@@ -99,8 +102,20 @@ async def favorite_add(req: FavoriteAddRequest,
 
     fav = Favorite(user_id=user.id, item_type=req.item_type, item_id=req.item_id,
                    title=title, sub=sub, payload=payload)
-    db.add(fav)
-    await db.flush()
+    # 上面的查重与下面的 INSERT 之间没有锁：双击/多标签并发会双双查空再各插一行。
+    # 用 SAVEPOINT 包住 INSERT（与 api/auth.py 设备码建号同一范式），撞唯一约束
+    # 就改读已存在的那条，既保证「重复收藏幂等」这句承诺，也不污染外层事务。
+    try:
+        async with db.begin_nested():
+            db.add(fav)
+            await db.flush()
+    except IntegrityError:
+        exist = (await db.execute(select(Favorite).where(
+            Favorite.user_id == user.id, Favorite.item_type == req.item_type,
+            Favorite.item_id == req.item_id).limit(1))).scalars().first()
+        if not exist:
+            return error(ErrorCode.PARAM_ERROR, "收藏失败，请重试")
+        return success({"id": exist.id}, msg="已在收藏中")
     return success({"id": fav.id}, msg="已收藏")
 
 

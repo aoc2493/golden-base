@@ -80,6 +80,7 @@ async def lifespan(app: FastAPI):
     install_alert_handler()
     try:
         _startup_check()
+        await _check_redis_reachable()
     except RuntimeError as e:
         # 自检不过时进程随即退出，Handler 用 create_task 投递的告警来不及发出就随进程一起消失，
         # 所以这里必须 await 一次（force 绕开去重：启动失败不能被同类故障的窗口吞掉）。
@@ -93,6 +94,7 @@ async def lifespan(app: FastAPI):
         # 故障要等到用户真的走到那条 SQL 才以 500 暴露——这里在启动期一次性拦下。
         await _verify_schema()
     await _seed_base_data()
+    await _check_membership_products()
     start_scheduler()
     yield
     logger.info("应用关闭中...")
@@ -192,6 +194,15 @@ def _startup_check():
             errors.append("DB_PASSWORD 仍是 .env.example 的示例值，生产环境必须替换")
         if settings.REDIS_PASSWORD == "dev-redis-password-change-me":
             errors.append("REDIS_PASSWORD 仍是 .env.example 的示例值，生产环境必须替换")
+        # Redis 故障降级口径。不阻断的理由：这是明确的属主可用性取舍（Redis 抖动时
+        # 是整体拒绝还是继续放行），且启动期另有 _check_redis_reachable 保证开服时 Redis 可用。
+        # 但它必须每次启动都留痕：置 false 之后，登录爆破限流、token 注销黑名单、会员额度
+        # 互斥锁会在 Redis 不可达的整个窗口内静默空转，而日志里一行都看不出来。
+        if not settings.REDIS_FAIL_CLOSED:
+            advisories.append(
+                "生产环境 REDIS_FAIL_CLOSED=false：Redis 不可达期间限流/黑名单/额度互斥锁一律"
+                "降级放行（攻击者可在此窗口内无限次枚举设备码、已注销 token 仍可用）；"
+                "docker-compose 已用 healthcheck 保证 Redis 先于后端就绪，无明确可用性诉求请保持默认 true")
         if not settings.cors_origins_list:
             errors.append("生产环境必须配置 CORS_ORIGINS（H5 前端域名），禁止放行所有来源")
         # N9：支付回调必须 HTTPS
@@ -207,10 +218,16 @@ def _startup_check():
         if not settings.ADMIN_TOKEN or settings.ADMIN_TOKEN == "change-me-admin-token":
             errors.append("生产环境必须在 .env 配置自定义 ADMIN_TOKEN，禁止使用代码默认值")
         # A4 合规：AI 生成合成内容必须带真实服务提供者标识（《标识办法》+ GB 45438-2025）。
-        # 底座不预设任何产品名，留空即无法生成合规的隐式标识，故生产阻断。
+        # 【接线状态】core 只提供标识工具（utils/ai_mark.py），自己不生成任何内容，
+        # 所以全库没有写入点：reports.ai_meta 要由真正调用模型的插件在生成时写。
+        # 由阻断降为最高级告警的理由：不含 AI 内容的部署没有法定标识义务，为一个此刻
+        # 用不到的能力拦着服务起不来，只会逼使用者填一个假的主体名——那才是合规的反面。
+        # 接入 AI 生成的插件时必须配置本项，故用 advisories（启动即以 ERROR 级打印）。
         if not (settings.AI_MARK_PROVIDER_NAME or "").strip():
-            errors.append("生产环境必须配置 AI_MARK_PROVIDER_NAME（AI 生成内容标识的服务提供者名称，"
-                          "须为真实备案/经营主体，不得留空）")
+            advisories.append("生产环境未配置 AI_MARK_PROVIDER_NAME：utils/ai_mark.py 的生成内容标识"
+                              "（隐式元数据 + 显式文案）无法产出合规主体名。本项只在「插件真的生成 "
+                              "AI 合成内容」时才是法定义务；接入此类插件前必须配成真实备案/经营主体"
+                              "名称，并在生成时把 build_ai_meta() 的结果写入 reports.ai_meta")
         # 门禁纵深防御：生产未配 IP 白名单 → ERROR 级醒目告警但不阻断。
         # 不做硬阻断的原因：管理端可能在公网靠强令牌+VPN/堡垒机运维，无固定办公 IP 的合法部署
         # 一旦被强制白名单就会上线即起不来；用最强告警替代阻断，兼顾「最高安全提示」与「可上线」。
@@ -282,6 +299,35 @@ def _startup_check():
         raise RuntimeError("启动自检未通过：" + "；".join(errors))
 
 
+async def _check_redis_reachable(client=None) -> None:
+    """生产开服必须验证 Redis 真的连得上——`_startup_check` 只能查「配了没」。
+
+    `redis.from_url` 是惰性建连的：地址、端口、密码全错也照样成功返回一个客户端，
+    于是「配置写错」在服务启动后不留任何痕迹，要到第一个真实请求才以业务故障暴露。
+    而 Redis 承载的恰好全是安全控制面：登录/刷新设备码限流、token 注销黑名单、
+    设备码释放标记、会员额度互斥锁。按 REDIS_FAIL_CLOSED 分两种结局，都比「起不来」更糟：
+      · true  —— 每个走限流的接口直接被拦，服务事实不可用，却表现为「全员被限流」，
+                 这是运维最难归因的一类故障（订单、退款、登录同时坏，且日志只有一行 warning）；
+      · false —— 限流与黑名单整体空转，等于裸奔上线，攻击面在故障窗口内不设防。
+    所以这里 PING 一次，连不上就拒绝启动（fail-fast），把配置错误压回部署时刻。
+    非生产不查：README 的「本地开发（无 Docker）」链路刻意不带 Redis，带上了反而起不来。
+    """
+    if not _is_prod_env():
+        return
+    if client is None:
+        from app.core.auth import redis_client as client
+    if client is None:
+        raise RuntimeError("启动自检未通过：生产环境 Redis 客户端未初始化"
+                           "（REDIS_HOST/REDIS_PORT/REDIS_URL 配置无效）")
+    try:
+        await client.ping()
+    except Exception as e:
+        raise RuntimeError(
+            f"启动自检未通过：生产环境 Redis 连不上（{type(e).__name__}: {e}）。"
+            "限流、token 注销黑名单、设备码释放标记与会员额度互斥锁都依赖 Redis，"
+            "请启动 Redis 或核对 .env 的 REDIS_HOST/REDIS_PORT/REDIS_PASSWORD") from e
+
+
 async def _init_sqlite_schema():
     """SQLite 轻量部署：按 ORM 模型建表（MySQL 部署仍用 sql/init.sql）"""
     from app.core.database import engine, Base
@@ -332,9 +378,9 @@ async def _verify_schema():
 async def _seed_base_data(db=None):
     """商品与系统配置种子（缺什么补什么，绝不覆盖已有行）。
 
-    通用底座只播种会员档位这类与底座能力直接对应的商品；
-    垂直业务商品由 SEED_VERTICAL_PRODUCTS 开关控制，默认不播种。
-    定价与 sql/init.sql 保持一致。
+    通用底座只播种会员档位这类与底座能力直接对应的商品（档位码取自
+    settings.MEMBERSHIP_TIER_SKUS，与 membership.level_of_sku 的反查表同源）；
+    垂直业务商品由各插件自己的 seed_data 钩子写入。定价与 sql/init.sql 保持一致。
 
     **只补不覆盖**：已存在的商品行一个字都不动。运营改过的价格/文案/排序、
     主动下架的档位，都必须活过重启——这也是当初把「同步到规则口径」删掉的唯一原因，
@@ -350,19 +396,25 @@ async def _seed_base_data(db=None):
     try:
         # 通用底座只播种会员档位；具体业务能力商品由 app/plugins/<业务>/ 的
         # manifest 声明，经注册表在下单链路按能力码动态取价，不在此预置。
+        # 商品码取自 settings.MEMBERSHIP_TIER_SKUS（与 membership.level_of_sku 同一张表）：
+        # 写死在此处曾导致「档位商品能下单、履约认不出 level」，付款后抛 ValueError。
         vip_specs = {
-            "vip_month": ("月卡会员", "99.00", 1,
-                          "开通起30天：会员权益、周期总额度100次、单能力单日10次"),
-            "vip_year": ("年卡会员", "299.00", 2,
-                         "开通起365天：会员权益、周期总额度1200次、单能力单日50次、优先客服"),
-            "vip_lifetime": ("终身会员", "599.00", 3,
-                             "平台运营期内永久：每365天周期总额度3000次、单能力单日100次、最高优先客服"),
+            "month": ("99.00", 1,
+                      "开通起30天：会员权益、周期总额度100次、单能力单日10次"),
+            "year": ("299.00", 2,
+                     "开通起365天：会员权益、周期总额度1200次、单能力单日50次、优先客服"),
+            "lifetime": ("599.00", 3,
+                         "平台运营期内永久：每365天周期总额度3000次、单能力单日100次、最高优先客服"),
         }
-        for sku, (nm, price, sort, desc) in vip_specs.items():
+        for level, (price, sort, desc) in vip_specs.items():
+            sku = settings.MEMBERSHIP_TIER_SKUS.get(level)
+            if not sku:
+                continue
             row = (await db.execute(select(Product.id).where(Product.sku_code == sku))).scalar_one_or_none()
             if row is None:
                 db.add(Product(sku_code=sku, product_type="membership", feature="vip",
-                               name=nm, description=desc, price=price,
+                               name=settings.MEMBERSHIP_TIER_NAME.get(level, f"{level}会员"),
+                               description=desc, price=price,
                                refund_rule="虚拟内容服务，支付后7天内未使用可联系客服退款",
                                sort_order=sort, enabled=1))
                 logger.info("已补插会员商品 %s（%s）", sku, price)
@@ -399,6 +451,41 @@ async def _seed_base_data(db=None):
             await db.close()
 
 
+async def _check_membership_products(db=None) -> None:
+    """启动期校验：库里每一个在售会员商品都必须能反查出会员档位。
+
+    会员履约只认 level：membership.grant_membership 拿不到档位即抛 ValueError，而这个抛出
+    点在支付履约事务里——钱已收、会员没到、订单永远停在未履约，且平台侧无从察觉。
+    这类脱钩（种子写死档位码 vs 反查只认插件 manifest）不需要任何请求就能踩中，
+    所以必须在启动时判掉，而不是等用户付款。生产拒绝启动，非生产留 ERROR 级记录。
+    """
+    from sqlalchemy import select
+
+    from app.core.database import AsyncSessionLocal
+    from app.core.models import Product
+    from app.core.services.membership import level_of_sku
+
+    own_session = db is None
+    if own_session:
+        db = AsyncSessionLocal()
+    try:
+        skus = (await db.execute(
+            select(Product.sku_code).where(Product.product_type == "membership",
+                                           Product.enabled == 1))).scalars().all()
+        bad = [s for s in skus if not level_of_sku(s)]
+        if not bad:
+            return
+        msg = (f"在售会员商品反查不到档位（sku={', '.join(bad)}）：用户付款后履约会抛 "
+               "ValueError(非会员SKU)，钱已收、权益不到。请在插件 manifest.membership_skus "
+               "声明档位码，或把 settings.MEMBERSHIP_TIER_SKUS 覆盖为这些码")
+        if _is_prod_env():
+            raise RuntimeError("启动自检未通过：" + msg)
+        logger.error("[启动自检-阻断项] %s", msg)
+    finally:
+        if own_session:
+            await db.close()
+
+
 app = FastAPI(
     title="通用应用后端 API",
     description="会员、单次/按天权益、微信/支付宝支付、一级直推分销与提现审核",
@@ -425,9 +512,9 @@ app.add_middleware(
                    "X-CSRF-Token", "X-Admin-Token", "X-Request-ID"],
 )
 
-# gzip：体积最大的静态资源是 js 目录下的行政区划数据（省-市-区县三级，约 145KB 纯文本，
-# 压缩率约 4:1）。开发态尤其必要：下面的 _static_no_cache 对所有非 /api 路径下发 no-store，
-# 浏览器不缓存，每次打开页面都要全量重传这些文件。
+# gzip：静态资源是纯文本（html/css/js），压缩率约 3~4:1，收益直接。
+# 开发态尤其必要：下面的 _static_no_cache 对所有非 /api 路径下发 no-store，
+# 浏览器不缓存，每次刷新页面都要全量重传这些文件。
 # 生产由 nginx 提供静态资源时这段不生效（WEB_ROOT 为空），压缩在 nginx.conf 里配。
 # minimum_size=1024：更小的响应压缩头本身就有 20 余字节，压了反而变大。
 app.add_middleware(GZipMiddleware, minimum_size=1024)

@@ -17,7 +17,6 @@ import re
 # 而它在昵称/备注里是合法字符（如「Tom & Jerry」），一并禁掉属于过度收紧。
 _MARKUP_CHARS = set('<>"\'`')
 _DATE_RE = re.compile(r"^\d{4}-\d{1,2}-\d{1,2}$")
-_TIME_RE = re.compile(r"^\d{1,2}:\d{2}(:\d{2})?$")
 
 
 def _upload_allowed_hosts() -> set:
@@ -101,18 +100,6 @@ def _check_date(v, field_cn: str):
     if not isinstance(v, str) or not _DATE_RE.match(v.strip()):
         raise ValueError(f"{field_cn}格式非法，应为 YYYY-MM-DD")
     return v.strip()
-
-
-def _check_time(v, field_cn: str):
-    """出生时辰必须形如 HH:MM（或 HH:MM:SS）；空值放行，由业务层按「时辰未知」处理"""
-    if v is None:
-        return None
-    s = v.strip() if isinstance(v, str) else ""
-    if not s:
-        return s if isinstance(v, str) else None
-    if not _TIME_RE.match(s):
-        raise ValueError(f"{field_cn}格式非法，应为 HH:MM")
-    return s
 
 
 # ===== 认证 =====
@@ -279,7 +266,8 @@ class ExamSubmitRequest(BaseModel):
     待接线说明（本次死代码清理仅标记、未改动行为）：配套的
     services.distribution_compliance.get_exam_paper / submit_exam / get_exam_status
     三个函数同样无调用点，而后台侧已全部接线（admin.py 的 /admin/exam/questions
-    增改查、列表展示 exam_passed），main.py 启动时还会往空表里种 10 道考题。
+    增改查、列表展示 exam_passed）。考题内容只有后台录入这一条路：
+    init.sql 不预置题目、main.py 也不播种，空库里 exam_questions 就是 0 行。
     后果：推广员无从参加考试，Distributor.exam_passed 恒为 0，后台展示的
     「是否通过合规考试」对所有都是否——第七条的考试前置要求目前不生效。"""
     answers: Dict[str, str] = Field(default_factory=dict, description="{question_id: 'A' 或 'A,B'}")
@@ -312,6 +300,10 @@ CONSENT_DOC_TYPES = ("^(privacy_policy|promoter_commitment|payment_disclaimer|ru
 
 class AgeDeclarationRequest(BaseModel):
     """A8：成年声明（自报公历出生日期，服务端据此推算周岁）。
+
+    【接线状态】无调用点：它服务的 POST /api/user/age-declaration 已随年龄门槛整体关闭下架
+    （见 api/user.py），故 FastAPI 也不会把它收进 /docs。保留是为了重新开启门槛时不必重设计
+    入参口径——下面的「只收出生日期、不收年龄布尔值」是法定证据口径，不是可以随手改的表单细节。
 
     只收出生日期，不收「我已成年」布尔值也不收年龄数字：客户端自述的年龄在争议中不构成
     任何证明，而出生日期可以反复推算、可与留痕时点对账。

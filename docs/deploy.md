@@ -72,6 +72,11 @@ docker compose up --build -d
 - MySQL / Redis 不映射宿主端口，只在 compose 内网可达。
 - 容器非 root、`cap_drop: ALL`、`no-new-privileges`。
 - `backend` 通过 healthcheck 等 MySQL/Redis 真正可连再启动（首次初始化会跑 init.sql，约需数十秒）。
+- 生产启动时后端自己也会向 Redis 发一次 `PING`：地址/端口/密码写错时 `redis.from_url` 不会报错
+  （惰性建连），要到第一个真实请求才暴露，而限流、token 注销黑名单、会员额度互斥锁全挂在 Redis 上。
+  连不上即拒绝启动并发告警，不会带着失效的安全控制面「启动成功」。
+- `REDIS_FAIL_CLOSED`（默认 true）决定 Redis 中途不可达时的取舍：true 整体拒绝、false 降级放行。
+  置 false 时每次启动都会打一条 ERROR 级自检记录——故障窗口内设备码枚举不限速、已注销 token 仍可用。
 - 全新库由 `sql/init.sql` 初始化；已有库不要重复执行它，改用增量脚本：
 
 ```bash
@@ -87,6 +92,7 @@ done
 ## 4. 上线核对
 
 - [ ] 仅 nginx / HTTPS 对外；MySQL、Redis 均不暴露公网且有强密码
+- [ ] 启动日志无「生产环境 Redis 连不上」——Redis 承载限流/黑名单/额度互斥锁，不可达时服务被刻意拒绝启动
 - [ ] 存量库已执行 `sql/migrations/` 下的全部脚本，启动日志无「结构校验」报错
 - [ ] `JWT_SECRET_KEY` / `SENSITIVE_FIELD_KEY` 为 32 字节以上随机值
 - [ ] `ADMIN_TOKEN` / `ADMIN_OPERATE_PASSWORD` 已替换，`/docs` 在生产关闭

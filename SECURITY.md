@@ -17,7 +17,9 @@
 
 - 启动自检 fail-closed：`JWT_SECRET_KEY`、`ADMIN_TOKEN`、`SENSITIVE_FIELD_KEY`
   缺失、过短或仍是 `.env.example` 的示例值时拒绝启动；生产环境额外校验 CORS、
-  管理二次密码、AI 标识主体，并逐值拦下 `DB_PASSWORD` / `REDIS_PASSWORD` 的示例口令。
+  管理二次密码，并逐值拦下 `DB_PASSWORD` / `REDIS_PASSWORD` 的示例口令。
+  AI 生成内容标识（`utils/ai_mark.py` + `AI_MARK_*`）是给业务插件接入的能力：底座自身
+  不生成内容，故未配置时只作最高级告警而不阻断（不含 AI 合成内容的部署没有标识义务）。
 - 启动期结构校验：`information_schema` 与 ORM 逐表逐列比对，生产环境缺列直接拒绝启动
   （避免「服务起来了、用户一点就 500」）；存量库修复走 `sql/migrations/`。
 - `PAYMENT_MOCK=true` 仅允许非生产环境；生产环境启动即拒绝，接口本身也返回 403。
@@ -50,6 +52,12 @@
 - 访问令牌有效期默认 7 天（`JWT_EXPIRE_DAYS`），无刷新令牌机制；缩短有效期需自行接入
   刷新流程。登出即时失效依赖 Redis 黑名单：未配置 Redis（SQLite 轻量模式）时，
   令牌在自然过期前始终有效。
+- 限流、登出黑名单、设备码释放标记、会员额度互斥锁四类控制全部存在 Redis 上，因此它们的
+  可用性等于 Redis 的可用性。`REDIS_FAIL_CLOSED=true`（默认）时 Redis 不可达直接拒绝请求，
+  是拿可用性换确定性；改成 `false` 则这四项在故障窗口内一律放行——攻击者可以无限次枚举设备码，
+  已注销的令牌也能继续用。生产环境启动自检会先 `PING` Redis，连不上就拒绝启动并 CRITICAL 告警；
+  但如果生产配置显式写了 `REDIS_FAIL_CLOSED=false`，启动自检只给建议、不阻断，这个降级窗口
+  是否可接受要由部署方确认（`test_startup_guard` 把两种行为都钉住了）。
 - 支付回放不另建 nonce 表：微信侧有 5 分钟时间戳窗口，且重复回调经 CAS 幂等处理，
   不会二次履约；如需更严的报文级去重，应在网关层加 nonce 缓存。
 - `docker-compose.yml` 的镜像标签是可覆盖的次版本标签（`mysql:8.0` 等），不是 digest。

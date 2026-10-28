@@ -188,7 +188,10 @@ async def check_feature(
 
 async def consume_entitlement(db: AsyncSession, entitlement_id: int) -> None:
     """把单条权益置为 used（CAS：仅 available 时生效，可重复调用）。
-    供运维手工核销；当前「一份内容可重复查看」语义下主链路不核销。"""
+    供运维手工核销；当前「一份内容可重复查看」语义下主链路不核销。
+
+    【接线状态】全库无调用点（含管理端）：核销入口尚未接任何接口，改状态请走数据库工单，
+    不要以为存在某个「一键核销」的后台按钮。"""
     await db.execute(
         update(UserEntitlement)
         .where(UserEntitlement.id == entitlement_id, UserEntitlement.status == "available")

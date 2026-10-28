@@ -7,6 +7,10 @@
    否则 models 里的 BigInteger 主键在 SQLite 下无法自增。
 3. `client` 默认带 `Origin`（与 base_url 同源）：CSRF 中间件要求 Cookie 会话的
    状态变更请求证明来自本站，浏览器真实请求也总会带这个头。
+
+`db` 与 `client` 是两个互不相通的库（各自 create_async_engine + 内存/独立连接）：
+同一个用例里同时用它们时，`db` 永远看不到 `client` 写入的行——想验证「有没有建号/建单」，
+在 client 用例里请判响应本身（如 set-cookie、返回码），别拿 db 计数，那样断言恒真。
 """
 import os
 

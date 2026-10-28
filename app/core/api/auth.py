@@ -332,6 +332,12 @@ async def login(req: LoginRequest, request: Request, db: AsyncSession = Depends(
     if not await redis_rate_limit(redis_client, f"login_limit:{get_client_ip(request)}",
                                   _LOGIN_LIMIT, _LOGIN_WINDOW):
         return error(ErrorCode.RATE_LIMIT, "操作过于频繁，请稍后再试")
+    # M8 的另一半：已解绑的设备码必须在这里就明确拒掉。_release_device_code 会把
+    # users.device_code 置空，缺了这道校验，旧码会落到下面「查无用户 → 新建账号」分支，
+    # 静默生成一个空账号（用户视角：订单/会员/余额全没了），与 /device/release 的承诺相反。
+    # /refresh 与微信绑定路径都查了，设备码主入口不能漏。
+    if await is_device_code_released(device_code):
+        return error(ErrorCode.NOT_LOGIN, "该设备的登录凭证已失效，请用邮箱或微信登录后重新绑定")
     user = (await db.execute(
         select(User).where(User.device_code == device_code, User.status == 1))).scalar_one_or_none()
     if user:

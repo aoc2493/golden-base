@@ -9,7 +9,7 @@ _self_refund_block）拦成「无实际支付金额，无需退款」，fulfill_
 现为完整闭环，回调入口共用同一个幂等的 _mark_order_paid（成功后调用 fulfill_paid_order）：
   · wechat/notify   —— 微信支付 V3 异步回调（验签解密→履约，含退款回调）；
   · alipay/notify   —— 支付宝异步回调（RSA2 验签→履约）。
-主动查单兜底见 services/pay_query.py；回调与查单最终都收口到 _mark_order_paid。
+主动查单兜底见 services/payment_sync.py；回调与查单最终都收口到 _mark_order_paid。
 真实回调落地地址由 settings.WECHAT_NOTIFY_URL / ALIPAY_NOTIFY_URL 配置，必须分别指向上面
 两个 notify 路由（生产要求 HTTPS，见 main._startup_check 的 N9 项）。
 """
@@ -219,20 +219,30 @@ async def _handle_wechat_refund(db: AsyncSession, result: dict) -> bool:
     if not refund:
         logger.error(f"微信退款回调：退款单不存在 refund_no={refund_no}")
         return False
-    # 金额校验：退款回调此前只按 refund_status 迁状态，不核对退款金额——
-    # 金额被篡改或渠道多退时本地会静默接受。此处以本地退款单金额为准，
-    # 不符即拒绝迁移并留痕（FAIL-CLOSED），由人工/对账介入。
-    cb_amount = result.get("amount")
-    local_amount = getattr(refund, "amount", None)
-    if cb_amount is not None and local_amount is not None:
-        try:
-            if to_money(cb_amount) != to_money(local_amount):
-                logger.error(f"微信退款回调金额与本地退款单不符，拒绝状态迁移 "
-                             f"refund_no={refund_no} local={local_amount} channel={cb_amount}")
-                return False
-        except Exception as _e:
-            logger.error(f"退款回调金额比对异常（按不符处理）refund_no={refund_no}: {_e}")
+    # 金额校验（资损红线）：本底盘的退款一律全额发起——api/order.py 与 api/admin.py 都按
+    # order.amount 调渠道退款，所以渠道回调里的退款额必须等于订单金额。
+    # 真实微信退款通知必然携带 amount.refund，缺字段即报文畸形；不符即部分退款/被篡改。
+    # 两者都拒绝迁移（回 FAIL 让微信重试，最终由 scheduler 主动查退款兜底推进），
+    # 宁可停在这里等人工，也不能让「渠道多退/少退」被本地静默接受。
+    cb_amount = result.get("refund_amount")
+    order = (await db.execute(
+        select(Order).where(Order.id == refund.order_id))).scalar_one_or_none()
+    if order is None:
+        logger.error(f"微信退款回调：退款单指向的订单不存在 refund_no={refund_no} "
+                     f"order_id={refund.order_id}")
+        return False
+    if cb_amount is None:
+        logger.error(f"微信退款回调未携带退款金额，无法轧账，拒绝迁移 refund_no={refund_no}")
+        return False
+    try:
+        if to_money(cb_amount) != to_money(order.amount):
+            logger.error(f"微信退款回调金额与订单不符，拒绝状态迁移 "
+                         f"refund_no={refund_no} order_no={order.order_no} "
+                         f"local={order.amount} channel={cb_amount}")
             return False
+    except Exception as _e:
+        logger.error(f"退款回调金额比对异常（按不符处理）refund_no={refund_no}: {_e}")
+        return False
     await apply_channel_refund_status(db, refund, refund_status, source="wechat_callback")
     return True
 

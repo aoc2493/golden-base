@@ -170,7 +170,7 @@ async def auto_refund_failed_reports():
                     order.status = "refund_pending"
                 else:
                     refund.status = "failed"
-                    refund.fail_reason = result.msg or "自动退款调用失败"
+                    refund.fail_reason = (result.msg or "自动退款调用失败")[:200]
                     # 平台未受理：还原抢占时置的 refund_pending，交给 retry_failed_refunds 继续推进。
                     # 同样必须用 Core UPDATE，ORM 赋值不会生成 UPDATE（内存值仍是 completed）。
                     await db.execute(update(Order).where(
@@ -261,7 +261,7 @@ async def retry_failed_refunds():
                     refund.status = "processing"
                     order.status = "refund_pending"
                 else:
-                    refund.fail_reason = f"第{refund.retry_count}次重试失败: {result.msg or ''}"
+                    refund.fail_reason = f"第{refund.retry_count}次重试失败: {result.msg or ''}"[:200]
                     # 平台仍未受理：把上面抢占时置的 refund_pending 还原为 completed，
                     # 否则订单永久卡在“退款中”，用户看不到已完成订单、下一轮重试也会被状态判断跳过。
                     # 必须用 Core UPDATE：ORM 实例内存里的 status 仍是抢占前的 completed，

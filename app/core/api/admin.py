@@ -536,7 +536,7 @@ async def admin_refund(order_id: int, req: AdminRefundRequest, request: Request,
             return success(msg="退款处理中，以支付平台最终结果为准")
         else:
             refund.status = "failed"
-            refund.fail_reason = result.msg or "支付平台退款失败"
+            refund.fail_reason = (result.msg or "支付平台退款失败")[:200]
             # 退款失败：把订单还原为抢占前的状态。此时权益并未回收，用户仍可正常使用，
             # 若让它长期停在「退款中」，用户既没拿到退款、又看不到自己的已完成订单。
             # 必须用 Core UPDATE 而不是 order.status = prev_status：抢占那条 UPDATE 之后，

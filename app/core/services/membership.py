@@ -38,10 +38,14 @@ def _member_covered_single_skus():
 
 
 def level_of_sku(sku_code: str) -> Optional[str]:
-    # 档位 SKU -> level 由注册表按各插件 manifest.membership_skus 反查
+    # 档位 SKU -> level：先按各插件 manifest.membership_skus 反查（业务自定义码优先），
+    # 查不到再回落到 settings.MEMBERSHIP_TIER_SKUS —— 底座商品就是按这张表播种的，
+    # 两边必须同源，否则「商品能下单、履约认不出档位」会在用户付款后才炸。
     from app.plugins import registry
     _, level = registry.membership_level_by_sku(sku_code)
-    return level
+    if level:
+        return level
+    return {sku: lvl for lvl, sku in settings.MEMBERSHIP_TIER_SKUS.items()}.get(sku_code)
 
 
 def days_for_level(level: str) -> Optional[int]:

@@ -14,6 +14,12 @@ GB 45438-2025《网络安全技术 人工智能生成合成内容标识方法》
 字段渲染标识条，新增内容形态不会再漏。
 
 本模块只构造/解释标识数据：不碰数据库、不发网络请求，可被工具层与服务层安全复用。
+
+【接线状态·读代码前必看】底座不生成任何内容，因此本模块在 app/ 下暂无调用点：
+reports.ai_meta 从未被写入、AiGenerationLog 只有清理任务（tasks/scheduler.py 的到期删除）
+而没有写入任务。接入方一旦让插件调用模型产内容，就必须补上两处：生成时
+`build_ai_meta(...)` 写入 reports.ai_meta 与 AiGenerationLog，下发时用 `label_payload(...)`
+展平给前端。只接了 demo 插件（无 AI 内容）的部署不需要配 AI_MARK_*，启动自检对此只告警。
 """
 import hashlib
 import json

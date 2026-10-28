@@ -286,6 +286,12 @@ class WechatPayService(PaymentService):
                 return None
             # H2：退款回调，返回 event=refund 供上层更新 Refund 状态
             if event_type.startswith("REFUND"):
+                _amt = result.get("amount") or {}
+                # 退款金额（元，Decimal）：微信在 amount.refund 给出实际退款额、
+                # amount.total 给出原订单额。上层要拿它和订单金额轧账，所以这里必须解出来
+                # ——此前退款分支不带任何金额字段，导致回调侧的金额校验无从取值。
+                _refund_fen = _amt.get("refund")
+                _total_fen = _amt.get("total")
                 return {
                     "event": "refund",
                     "event_type": event_type,
@@ -293,6 +299,8 @@ class WechatPayService(PaymentService):
                     "order_no": result.get("out_trade_no"),
                     "refund_status": result.get("refund_status"),
                     "channel_refund_no": result.get("refund_id"),
+                    "refund_amount": (Decimal(str(_refund_fen)) / 100) if _refund_fen is not None else None,
+                    "channel_order_amount": (Decimal(str(_total_fen)) / 100) if _total_fen is not None else None,
                 }
             return {
                 "event": "payment",

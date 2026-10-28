@@ -25,7 +25,7 @@ CREATE TABLE IF NOT EXISTS `users` (
   `inviter_id`          BIGINT UNSIGNED DEFAULT NULL COMMENT '一级邀请人，仅绑定一次',
   `invited_at`          DATETIME     DEFAULT NULL,
   `last_login_type`     VARCHAR(16)  DEFAULT NULL COMMENT '最近登录标识类型 device/oa_openid/mp_openid/unionid',
-  `last_login_value`    VARCHAR(64)  DEFAULT NULL COMMENT '最近登录标识值',
+  `last_login_value`    VARCHAR(255) DEFAULT NULL COMMENT '最近登录标识值（邮箱可达255）',
   `created_at`          DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
   UNIQUE KEY `uk_device_code` (`device_code`),
   UNIQUE KEY `uk_oa_openid` (`oa_openid`),
@@ -70,7 +70,8 @@ CREATE TABLE IF NOT EXISTS `favorites` (
   `title`      VARCHAR(100) DEFAULT NULL,
   `sub`        VARCHAR(200) DEFAULT NULL,
   `payload`    JSON         DEFAULT NULL COMMENT '展示快照',
-  `created_at` DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP
+  `created_at` DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY `uk_favorite_item` (`user_id`, `item_type`, `item_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='用户收藏表';
 
 -- ===== 商品表（SKU 化，价格以后端为准）=====
@@ -108,7 +109,7 @@ CREATE TABLE IF NOT EXISTS `orders` (
   `biz_data`       JSON            DEFAULT NULL COMMENT '业务快照（由插件写入）',
   `inviter_id`     BIGINT UNSIGNED DEFAULT NULL COMMENT '下单时一级邀请人',
   `login_id_type`  VARCHAR(16)     DEFAULT NULL COMMENT '下单时登录标识类型快照',
-  `login_id_value` VARCHAR(64)     DEFAULT NULL COMMENT '下单时登录标识值快照',
+  `login_id_value` VARCHAR(255)    DEFAULT NULL COMMENT '下单时登录标识值快照',
   `paid_at`        DATETIME        DEFAULT NULL,
   `pay_url`        VARCHAR(500)    DEFAULT NULL,
   `pay_trade_no`   VARCHAR(64)     DEFAULT NULL COMMENT '支付平台交易号',
@@ -120,7 +121,7 @@ CREATE TABLE IF NOT EXISTS `orders` (
   INDEX `ix_orders_sku_code` (`sku_code`),
   -- 用户「我的订单」与后台列表按 user_id 过滤；关单/查单/对账任务按 (status, created_at) 扫描。
   -- 缺这两条索引时两类查询都是全表扫描，而 orders 是增长最快的一张表。
-  INDEX `ix_orders_user_id` (`user_id`),
+  INDEX `ix_orders_user_created` (`user_id`, `created_at`),
   INDEX `ix_orders_status_created` (`status`, `created_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='订单表';
 
