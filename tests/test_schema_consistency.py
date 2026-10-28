@@ -129,3 +129,66 @@ def test_init_sql_indexes_cover_models():
             if isinstance(con, UniqueConstraint) and con.name and con.name.lower() not in names:
                 problems.append(f"{table_name} 的唯一约束 {con.name} 在 init.sql 中缺失")
     assert not problems, "init.sql 索引与 ORM 不一致：\n" + "\n".join(problems)
+
+
+def test_bigint_sqlite_patch_is_not_gated_on_main_db(tmp_path):
+    """主库配成 MySQL 时，同进程临时建起的 SQLite 库也必须能自增插入。
+
+    起因（CI 真实翻车）：BigInteger→INTEGER 的 SQLite 方言补丁原先写成
+    `if settings.DB_TYPE == "sqlite"`，MySQL 作业里主库是 MySQL 所以补丁不注册；
+    并发用例自己新建的 SQLite 文件库于是拿到 `id BIGINT NOT NULL PRIMARY KEY`——
+    SQLite 里只有 INTEGER 主键才是 rowid 别名，BIGINT 主键不自增，
+    插入直接 `NOT NULL constraint failed: users.id`。
+
+    必须在子进程里测：补丁是否在「导入 app.core.database 时」注册，取决于那一刻的
+    settings.DB_TYPE；在本进程里 monkeypatch 已经太晚（模块早就导入了），
+    改出来的用例只会在两种实现下都绿，等于没断言。
+    """
+    import os
+    import subprocess
+    import sys
+
+    db_path = (tmp_path / "mysqlmain.db").as_posix()
+    script = f"""
+import asyncio, sys
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import create_async_engine
+import app.core.database  # noqa: F401  按 DB_TYPE=mysql 导入，触发被测分支
+from app.core.models import Base, User
+
+async def main():
+    engine = create_async_engine("sqlite+aiosqlite:///{db_path}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+        ddl = (await conn.execute(text(
+            "SELECT sql FROM sqlite_master WHERE name='users'"))).scalar_one()
+    async with engine.begin() as conn:
+        await conn.execute(User.__table__.insert().values(phone="13900000099"))
+        row = (await conn.execute(text("SELECT id FROM users"))).scalar_one()
+    await engine.dispose()
+    if "BIGINT" in ddl.upper():
+        print("BADDDL:" + ddl, file=sys.stderr)
+        sys.exit(3)
+    if not row:
+        print("BADID:" + repr(row), file=sys.stderr)
+        sys.exit(4)
+    print("OK")
+
+asyncio.run(main())
+"""
+    env = {**os.environ,
+           "PYTHONIOENCODING": "utf-8",
+           "DB_TYPE": "mysql", "DB_HOST": "127.0.0.1", "DB_PORT": "3306",
+           "DB_NAME": "app_db", "DB_USER": "ci-user", "DB_PASSWORD": "ci-password",
+           "APP_ENV": "development",
+           "JWT_SECRET_KEY": os.environ.get("JWT_SECRET_KEY", "test-jwt-secret-" + "0" * 32),
+           "ADMIN_TOKEN": os.environ.get("ADMIN_TOKEN", "test-admin-token"),
+           "SENSITIVE_FIELD_KEY": os.environ.get("SENSITIVE_FIELD_KEY",
+                                                 "test-sensitive-field-key-0123456789")}
+    root = str(pathlib.Path(__file__).resolve().parents[1])
+    r = subprocess.run([sys.executable, "-c", script], cwd=root, env=env,
+                       capture_output=True, text=True, encoding="utf-8", errors="replace",
+                       timeout=120)
+    assert r.returncode == 0, (
+        "主库为 MySQL 时 SQLite 建表/自增失败（BigInteger→INTEGER 方言补丁被按主库配置关掉了）\n"
+        f"rc={r.returncode}\nstdout={r.stdout}\nstderr={r.stderr}")

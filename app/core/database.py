@@ -1,18 +1,20 @@
+from sqlalchemy import BigInteger as _BigInteger
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
+from sqlalchemy.ext.compiler import compiles as _compiles
 from sqlalchemy.orm import DeclarativeBase
 from app.config import settings
 
 _IS_SQLITE = settings.DB_TYPE == "sqlite"
 
-if _IS_SQLITE:
-    # SQLite 下 BIGINT 主键不是 rowid 别名，无法自增；统一编译为 INTEGER 兼容建表。
-    # MySQL 方言不受影响，仍按 BIGINT 建表。
-    from sqlalchemy import BigInteger as _BigInteger
-    from sqlalchemy.ext.compiler import compiles as _compiles
+# SQLite 下 BIGINT 主键不是 rowid 别名，无法自增；统一编译为 INTEGER 兼容建表。
+# 这里**不按 settings.DB_TYPE 判定**：补丁注册在 sqlite 方言上，对 MySQL 建表零影响，
+# 但一个进程里可能同时存在两条方言的引擎（主库 MySQL + 测试/工具脚本的 SQLite 文件库）。
+# 若跟着主库配置走，MySQL 部署下临时建起的 SQLite 引擎会拿到 `id BIGINT NOT NULL PRIMARY KEY`
+# ——非 rowid 别名、不自增，插入直接 NOT NULL constraint failed（CI 的 MySQL 作业就踩过）。
+@_compiles(_BigInteger, "sqlite")
+def _bigint_to_integer(type_, compiler, **kw):
+    return "INTEGER"
 
-    @_compiles(_BigInteger, "sqlite")
-    def _bigint_to_integer(type_, compiler, **kw):
-        return "INTEGER"
 
 # SQLite 不支持连接池参数与 FOR UPDATE；生产仍走 MySQL 完整参数。
 # SQLite 下另关闭 insertmanyvalues：批量 INSERT+RETURNING 在 aiosqlite 上不可靠，逐条执行更稳。

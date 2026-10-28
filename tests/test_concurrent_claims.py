@@ -4,11 +4,12 @@
 本 session 内存里的旧值。回调重复投递时两条链路各自的 session 都读到「未履约/未退款」，
 双双穿过内存闸 → 会员天数二次顺延、佣金二次冲回、权益二次发放。
 
-写法说明（为什么不是 asyncio.gather）：真实并发要 MySQL 行锁才复现得干净，本机没有。
-但缺陷的充分条件不是「同时执行」，而是「B 拿着陈旧的内存判定进入 CAS 之前的那步 SELECT」——
+写法说明（为什么不是 asyncio.gather）：真实并发要 MySQL 行锁才复现得干净，本地没有 MySQL
+时退化成文件库——缺陷的充分条件不是「同时执行」，而是「B 拿着陈旧的内存判定进入 CAS 之前的那步 SELECT」——
 所以这里显式造出陈旧状态：B 先读到订单/退款单，然后结束自己的事务（expire_on_commit=False
 让实例保留刚读到的值），A 完成并提交，B 再执行。若实现只用内存闸，B 必然二次履约/二次回收；
 用条件 UPDATE 抢占，B 的 WHERE 不再匹配 → rowcount=0 → 幂等返回。
+CI 的 MySQL 作业会把同一个用例打到真实 MySQL 上（见 factory fixture 按 DB_TYPE 选方言）。
 """
 from datetime import datetime
 from decimal import Decimal
@@ -19,6 +20,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 import app.core.database  # noqa: F401  副作用导入：注册 SQLite 方言补丁（BigInteger→INTEGER）
+from app.config import settings
 from app.core.api.payment import _mark_order_paid
 from app.core.models import Base, Order, Refund, User
 from app.core.services import refund_state
@@ -28,15 +30,26 @@ AMOUNT = Decimal("39.90")
 
 @pytest_asyncio.fixture
 async def factory(tmp_path):
-    """独立文件库 + 多个真实连接：两个 session 必须各占一条连接才谈得上并发投递。
+    """独立库 + 多个真实连接：两个 session 必须各占一条连接才谈得上并发投递。
 
     不能用 conftest 的 :memory: + StaticPool——所有 session 共用一条连接，
     第二个事务永远看得见第一个的未提交写入，测不出「提交后才可见」的抢占语义。
+
+    方言跟着 settings.DB_TYPE 走（与 conftest 同口径）：CI 的 MySQL 作业里必须用 MySQL，
+    否则同一进程里主库是 MySQL、这里是 SQLite，`row_lock()` 的 FOR UPDATE 会打到 SQLite，
+    而用例想验证的正是真实行锁下的 CAS 抢占。MySQL 作业每次从干净 schema 起步。
     """
-    engine = create_async_engine(
-        f"sqlite+aiosqlite:///{(tmp_path / 'conc.db').as_posix()}",
-        connect_args={"check_same_thread": False, "timeout": 15})
+    if settings.DB_TYPE == "mysql":
+        engine = create_async_engine(settings.database_url, pool_pre_ping=True,
+                                     pool_size=5, max_overflow=5)
+    else:
+        engine = create_async_engine(
+            f"sqlite+aiosqlite:///{(tmp_path / 'conc.db').as_posix()}",
+            connect_args={"check_same_thread": False, "timeout": 15},
+            insertmanyvalues_page_size=1)
     async with engine.begin() as conn:
+        if settings.DB_TYPE == "mysql":
+            await conn.run_sync(Base.metadata.drop_all)
         await conn.run_sync(Base.metadata.create_all)
     yield async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     await engine.dispose()
