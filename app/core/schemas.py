@@ -21,18 +21,12 @@ _TIME_RE = re.compile(r"^\d{1,2}:\d{2}(:\d{2})?$")
 
 
 def _upload_allowed_hosts() -> set:
-    """【未接线·全库无调用点】L5：头像/反馈图允许的图片域名白名单。
-    上传接口返回两类地址：COS_CDN_DOMAIN 下的绝对 URL（配置时），
-    或 COS 桶默认域名 {bucket}.cos.{region}.myqcloud.com（未配置 CDN 时）。
-    仅当两者之一命中才放行，拦截任意外站 URL 作跟踪像素/钓鱼跳转。
+    """图片地址允许的域名白名单：配置的 CDN 域名 + COS 桶默认域名。
 
-    待接线说明（本次死代码清理仅标记、未改动行为）：
-    实际生效的是 UserUpdateRequest._v_avatar 与 FeedbackRequest._limit_images 里
-    各自内联的一份 cos_host 推导，二者只认 COS_CDN_DOMAIN；而 utils/oss.py 的
-    _public_url 在未配 CDN 时返回的正是桶默认域名，故那种部署下上传能成功、
-    回写头像/反馈图却会被判「域名不受信任」。本函数额外收录了桶域名，
-    口径才是完整的；接线时需同时消除那两份内联重复。白名单仍只含自家 COS 域名，
-    不放宽任何外部来源。"""
+    上传接口返回两类地址：COS_CDN_DOMAIN 下的绝对 URL（配置时），或
+    {bucket}.cos.{region}.myqcloud.com（未配置 CDN 时）。两者都必须放行，
+    否则「未配 CDN」的部署会表现为上传成功、回写头像/反馈图却被判域名不受信任。
+    只收录自家 COS 域名，不放宽任何外部来源。"""
     from app.config import settings
     allowed = set()
     host = (settings.COS_CDN_DOMAIN or "").strip().lower()
@@ -44,6 +38,44 @@ def _upload_allowed_hosts() -> set:
     if settings.COS_BUCKET and settings.COS_REGION:
         allowed.add(f"{settings.COS_BUCKET}.cos.{settings.COS_REGION}.myqcloud.com".lower())
     return allowed
+
+
+def _check_image_url(u, field_cn: str) -> str:
+    """校验单个图片地址并归一：只接受站内单斜线绝对路径，或白名单域名的 http(s) 地址。
+
+    反斜线必须显式拒绝：浏览器把 `/\\evil.com/x` 按 `//evil.com/x` 规范化，只判
+    startswith("//") 会被绕过（存储型外链/追踪像素）。
+    URL 的 host 用 urlsplit 取，不用字符串 split，避免 `host:port` / 大小写差异误判。
+    """
+    from urllib.parse import urlsplit
+
+    if not isinstance(u, str):
+        raise ValueError(f"{field_cn}格式非法")
+    s = u.strip()
+    if not s:
+        raise ValueError(f"{field_cn}为空")
+    if len(s) > 500:
+        raise ValueError(f"{field_cn}过长")
+    if any(ord(c) < 32 or ord(c) == 127 for c in s):
+        raise ValueError(f"{field_cn}含非法字符")
+    if "\\" in s:
+        raise ValueError(f"{field_cn}协议非法")
+    if s.startswith("//"):
+        raise ValueError(f"{field_cn}协议非法")
+    if s.startswith("/"):
+        if ".." in s:
+            raise ValueError(f"{field_cn}含非法路径")
+        return s
+    parsed = urlsplit(s)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        raise ValueError(f"{field_cn}协议非法")
+    host = parsed.hostname.lower()
+    allowed = _upload_allowed_hosts()
+    if not allowed:
+        raise ValueError(f"{field_cn}域名不受信任（未配置 COS）")
+    if host not in allowed:
+        raise ValueError(f"{field_cn}域名不受信任")
+    return s
 
 
 def _reject_markup(v, field_cn: str):
@@ -142,15 +174,13 @@ class BindInviteRequest(BaseModel):
 
 
 class TouchRequest(BaseModel):
-    """【未接线·无端点使用本模型】第三十六条：推广触达上报（公开端点，未注册访客点击专属链接/扫码时调用）。
-    visitor_key 需与后续注册用户的 device_code 一致，才能完成 90 天末次触达归因。
+    """推广触达上报（公开端点 POST /api/distribution/touch）。
 
-    待接线说明（本次死代码清理仅标记、未改动行为）：与之配套的
-    services.distribution.record_touch 同样无调用点，因此触达记录从未落库，
-    resolve_attribution 永远返回 None，归因实际始终回退到「直传邀请码」一条路径，
-    第三十六条的 90 天末次触达规则目前不生效。补齐上报端点即可打通。"""
-    invite_code: str = Field(..., max_length=12)
-    visitor_key: str = Field(..., min_length=1, max_length=64)
+    访客点击专属链接/扫码进入落地页时调用一次，用于「90 天末次触达」归因：
+    visitor_key 必须与后续注册用户的 device_code 一致才能完成归因。未注册访客没有
+    device_code 时可不传（该次触达不参与归因，不影响直传邀请码那条主路径）。"""
+    invite_code: str = Field(..., min_length=1, max_length=12)
+    visitor_key: Optional[str] = Field(None, max_length=64)
 
 
 # ===== 订单 =====
@@ -191,9 +221,12 @@ class RefundRequest(BaseModel):
 
 # ===== 权益校验 =====
 class EntitlementCheckRequest(BaseModel):
-    # 白名单而非自由字符串：feature 直接进权益查询与配额 key，不拦住就会让任意自造
-    # 功能名进入数据库查询。新增付费功能时必须同步登记（否则前端校验直接 422）。
-    feature: str = Field(..., pattern="^[a-z][a-z0-9_]{0,31}$")
+    # 收紧为「小写标识符 + 至多一个点分命名空间」（如 vip、demo.echo）：feature 直接进
+    # 权益查询与配额 key，任意自造字符串会让脏值进入数据库查询。长度 20 与
+    # user_entitlements.feature（VARCHAR(20)）对齐——超长值否则要到落库时才报错。
+    # 点号是插件能力码的正式分隔符（manifest 里 code="demo.echo"），不能按变量的字符集排掉。
+    feature: str = Field(..., max_length=20,
+                         pattern=r"^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)?$")
     biz_key: Optional[str] = Field(None, max_length=64)
     # 双人能力的业务键由双方信息推导，前端算不出服务端的哈希，故上送原始信息由服务端派生，
     # 与运行期准备端点同一思路：键一律服务端重算，绝不采信前端传值。
@@ -610,40 +643,15 @@ class UserUpdateRequest(BaseModel):
     @field_validator("avatar_url")
     @classmethod
     def _v_avatar(cls, v):
-        # avatar_url 应仅存放 /api/upload/avatar 返回的图片地址。原定义只限长度、不限协议，
-        # 可写入 javascript: / data:text/html 等伪协议地址，也可写入任意外站 URL 做跟踪像素；
-        # 一旦有页面把它放进 <a href> 或 style="background:url()" 就是可执行的注入面。
-        # L5：进一步收紧域名——仅允许本服务相对路径，或配置的腾讯云 COS_CDN_DOMAIN 下的
-        # 绝对地址（上传接口正是返回这两种地址），拦截任意外站 URL 追踪/钓鱼。
+        # avatar_url 应仅存放 /api/upload/avatar 返回的图片地址。只限长度、不限协议时
+        # 可写入 javascript: / data:text/html 等伪协议（页面把它放进 <a href> 即成注入面），
+        # 也可写入任意外站 URL 做跟踪像素/钓鱼。口径与反馈图共用 _check_image_url。
         if v is None:
             return None
-        if not isinstance(v, str):
-            raise ValueError("头像地址格式非法")
-        s = v.strip()
+        s = str(v).strip()
         if not s:
             return None
-        if len(s) > 500:
-            raise ValueError("头像地址过长")
-        if any(ord(c) < 32 or ord(c) == 127 for c in s):
-            raise ValueError("头像地址含非法字符")
-        if s.startswith("//"):
-            raise ValueError("头像地址协议非法")
-        if s.startswith("/"):
-            # 本服务相对路径（同源静态/上传返回路径）
-            return s
-        from app.config import settings
-        cos_host = (settings.COS_CDN_DOMAIN or "").strip().lower()
-        if cos_host.startswith(("http://", "https://")):
-            cos_host = cos_host.split("/")[2] if "/" in cos_host else cos_host
-        cos_host = cos_host.rstrip("/")
-        if s.lower().startswith(("http://", "https://")):
-            if not cos_host:
-                raise ValueError("头像地址域名不受信任（未配置 COS_CDN_DOMAIN）")
-            host = s.lower().split("/")[2]
-            if host != cos_host:
-                raise ValueError("头像地址域名不受信任")
-            return s
-        raise ValueError("头像地址协议非法")
+        return _check_image_url(s, "头像地址")
 
 
 # ===== 反馈 =====
@@ -656,38 +664,12 @@ class FeedbackRequest(BaseModel):
     @field_validator("images")
     @classmethod
     def _limit_images(cls, v):
-        # images 应仅存放 /api/upload/feedback 返回的图片地址。原定义只限制条数，
-        # 不限制单条长度与协议：可写入任意超长字符串白占 JSON 列空间，也可写入
-        # 非 http(s) 协议地址（后台一旦渲染图片就是注入面）。
-        # L5：与 avatar_url 同口径——仅允许相对路径或 COS_CDN_DOMAIN 下的地址。
+        # images 应仅存放 /api/upload/feedback 返回的图片地址：只限条数不校验地址，
+        # 就能写入超长字符串占空间或任意协议地址（后台渲染即成注入面）。
+        # 与 avatar_url 同口径，共用 _check_image_url。
         if v is None:
             return None
-        from app.config import settings
-        cos_host = (settings.COS_CDN_DOMAIN or "").strip().lower()
-        if cos_host.startswith(("http://", "https://")):
-            cos_host = cos_host.split("/")[2] if "/" in cos_host else cos_host
-        cos_host = cos_host.rstrip("/")
-        out = []
-        for u in v:
-            if not isinstance(u, str):
-                raise ValueError("图片地址格式非法")
-            u = u.strip()
-            if len(u) > 500:
-                raise ValueError("图片地址过长")
-            if u.startswith("//"):
-                raise ValueError("图片地址协议非法")
-            if u.startswith("/"):
-                out.append(u)
-                continue
-            if not u.lower().startswith(("http://", "https://")):
-                raise ValueError("图片地址协议非法")
-            if not cos_host:
-                raise ValueError("图片地址域名不受信任（未配置 COS_CDN_DOMAIN）")
-            host = u.lower().split("/")[2]
-            if host != cos_host:
-                raise ValueError("图片地址域名不受信任")
-            out.append(u)
-        return out
+        return [_check_image_url(u, "图片地址") for u in v]
 
 
 class GuestFeedbackRequest(BaseModel):

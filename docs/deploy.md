@@ -12,7 +12,9 @@ PYTHON_IMAGE=python:3.12-slim@sha256:<digest>
 ```
 
 建库走 `sql/init.sql`（仅在数据卷为空时执行），它与 `app/core/models.py` 的一致性
-由 `tests/test_schema_consistency.py` 守住——改模型却漏改 init.sql 会直接让 CI 变红。
+由 `tests/test_schema_consistency.py` 守住：表名、每张表的列名、ORM 声明的索引都要对得上，
+改模型却漏改 init.sql 会直接让 CI 变红。存量库的增量变更写在 `sql/migrations/`，
+后端启动时还会用 `information_schema` 逐表逐列核对一次——缺列在生产环境直接拒绝启动。
 
 面向「拿到底座 → 接入业务 → 上线运营」的部署方。
 
@@ -24,6 +26,7 @@ PYTHON_IMAGE=python:3.12-slim@sha256:<digest>
 | `app/plugins/demo/` | 示例插件；新业务复制该目录改造 |
 | `app/config.py` | 全部配置项，真值走环境变量 |
 | `sql/init.sql` | 全量建表 + 会员三档种子，仅在 MySQL 数据卷为空时执行 |
+| `sql/migrations/` | 存量库增量脚本（按编号顺序执行，幂等，可重复运行） |
 | `nginx/nginx.conf` | 静态前端 + `/api` 反代 + 限流 + 安全头 |
 | `docker-compose.yml` | MySQL + Redis + 后端 + nginx |
 | `.env.example` | 环境变量模板，复制为 `.env` 后填真值 |
@@ -50,6 +53,13 @@ REDIS_PASSWORD=<强密码>
 - `SENSITIVE_FIELD_KEY` 一旦上线不得更换：换了之后已入库的密文全部解不开。
 - `TRUST_PROXY_HEADERS=true` 时务必同时配置 `PROXY_AUTH_SECRET`，并让 nginx 注入
   `X-Proxy-Auth`（本仓库 `nginx/nginx.conf` 已注入），否则限流与管理端爆破锁定可被伪造头绕过。
+- `.env.example` 里的 `dev-*` 示例口令（JWT/ADMIN_TOKEN/SENSITIVE_FIELD_KEY/DB_PASSWORD/
+  REDIS_PASSWORD）在生产启动时按值阻断，照抄示例文件上不了线。
+- 合规开关默认按「开箱可用」关闭，上线前逐项确认（启动日志会以 ERROR 级重复提示）：
+  `ENFORCE_PAYMENT_DISCLAIMER=true`（支付前免责勾选的服务端校验）、
+  `WITHDRAW_TAX_ENABLED=true`（佣金提现代扣个税，税率见 `WITHDRAW_TAX_RATE`）。
+- 年龄门槛（成年声明 / 监护人同意）已按属主决策于 2026-09-11 关闭，
+  `minor_guard` 恒放行；若业务可能触达未成年人，需在运营侧另做限制。
 
 ## 3. 部署
 
@@ -61,11 +71,23 @@ docker compose up --build -d
 - 默认对外端口 `HTTP_PORT=8080`；生产建议在前置网关（云 LB / 宿主 nginx / certbot）终结 TLS 后回源。
 - MySQL / Redis 不映射宿主端口，只在 compose 内网可达。
 - 容器非 root、`cap_drop: ALL`、`no-new-privileges`。
-- 全新库由 `sql/init.sql` 初始化；已有库不要重复执行。
+- `backend` 通过 healthcheck 等 MySQL/Redis 真正可连再启动（首次初始化会跑 init.sql，约需数十秒）。
+- 全新库由 `sql/init.sql` 初始化；已有库不要重复执行它，改用增量脚本：
+
+```bash
+for f in sql/migrations/*.sql; do
+  docker compose exec -T mysql mysql -u"$DB_USER" -p"$DB_PASSWORD" "$DB_NAME" < "$f"
+done
+```
+
+  脚本全部按 `information_schema` 判存在性后再执行，可重复运行；执行前先
+  `mysqldump --single-transaction` 备份。漏跑不会静默：启动时的结构校验会在生产环境
+  直接拒绝启动并指名缺失的表/列。
 
 ## 4. 上线核对
 
 - [ ] 仅 nginx / HTTPS 对外；MySQL、Redis 均不暴露公网且有强密码
+- [ ] 存量库已执行 `sql/migrations/` 下的全部脚本，启动日志无「结构校验」报错
 - [ ] `JWT_SECRET_KEY` / `SENSITIVE_FIELD_KEY` 为 32 字节以上随机值
 - [ ] `ADMIN_TOKEN` / `ADMIN_OPERATE_PASSWORD` 已替换，`/docs` 在生产关闭
 - [ ] `CORS_ORIGINS` 明确列域名，禁止 `*`

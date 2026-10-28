@@ -173,19 +173,13 @@ async def _dist_by_code(db: AsyncSession, invite_code: Optional[str]) -> Optiona
 
 async def record_touch(db: AsyncSession, visitor_key: Optional[str], invite_code: Optional[str],
                        ip: Optional[str] = None, ua: Optional[str] = None) -> bool:
-    """【未接线·全库无调用点】第三十六条第1款：用户点击专属链接/扫码/海报进入即记一次触达。
+    """第三十六条第1款：用户点击专属链接/扫码/海报进入即记一次触达。
     visitor_key 为未注册访客标识（设备指纹/匹名 device_code）；邀请码非法或推广员
     已注销/冻结/断链时不产生有效触达（第五十条断链、第六十条冻结期暂停新增绑定）。
 
-    待接线说明（本次死代码清理仅标记、未改动行为）：
-    本函数是 attribution_touch 表唯一的写入方，但全库零调用点（配套的
-    schemas.TouchRequest 也没有端点使用），故该表永远为空。下游并未因此
-    报错：同文件 bind_inviter 先调 resolve_attribution（读不到行就返回 None），
-    再回退到「直传邀请码」那一路，所以推广绑定实际只靠邀请码生效。
-    真正丢掉的是「末次触达归因」：用户先点链接、后自行注册（URL 上没带
-    邀请码）的场景归因不到推广员，且 bind_inviter 末尾回填 bound_user_id 的
-    UPDATE 永远命中 0 行（防作弊溯源链为空）。接线时需在推广链接/二维码
-    落地页的入口处调用本函数，传入 visitor_key 与邀请码。"""
+    调用方：api/distribution.py 的 POST /touch（公开接口，未登录访客上报落地页打开）。
+    写入 attribution_touch 后，bind_inviter 才能经 resolve_attribution 做 90 天末次触达
+    归因，并回填 bound_user_id；否则绑定只能退回「直传邀请码」那一路。"""
     if not visitor_key or not invite_code:
         return False
     dist = await _dist_by_code(db, invite_code)

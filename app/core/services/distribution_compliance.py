@@ -129,7 +129,7 @@ async def record_consent(db: AsyncSession, user: User, doc_type: str, doc_versio
 
 
 async def has_signed(db: AsyncSession, user_id: int, doc_type: str) -> bool:
-    """【未接线·全库无调用点】是否【当前】处于已签署/已同意状态（用于注册与支付前校验）。
+    """是否【当前】处于已签署/已同意状态（取最新一行且 agreed=1）。
 
     A6：取最新一行，而不是「有没有 agreed=1 的行」。一旦支持撤回（services.consent 会
     追加 agreed=0 的行），旧口径会把已撤回的人继续当成已同意——用户明明撤回了，系统
@@ -137,20 +137,12 @@ async def has_signed(db: AsyncSession, user_id: int, doc_type: str) -> bool:
     排序用 id 而不是 agreed_at：同一秒内可能有多行（先撤回再重新同意），时间戳分不出
     先后，自增 id 能。
 
-    待接线说明（本次死代码清理仅标记、未改动行为）：
-    本函数是通用的「当前是否已同意」判定，但全库零调用点。实际生效的是
-    services/consent.py 里两个更专用的函数：ensure_privacy_consent（隐私同意，由
-    archive.py / order.py / user.py 三处建档与下单入口调用，对从未留痕的存量用户
-    fail-open）与 latest_agreed_version（按文本版本号比对，由 distribution.py 的规则变更
-    确认与 minor_guard.py 的他人出生信息告知调用）。
-    仍没有任何服务端闸门的是两类文书：
-      · DOC_PAYMENT_DISCLAIMER（第五十六条第3款 支付前免责勾选）——只由前端调
-        sign() 写留痕，下单/支付路径不校验它有没有签，不勾也能付款；
-      · DOC_COMMITMENT（第十二条 合规推广承诺书）——consent_signed_at 字段全库
-        只写不读（签署时置时间、撤回时置 None），没有任何准入判定引用它。
-    接线时这两处应直接调用本函数（它已是「最新一行」语义，与撤回机制自洽）；
-    consent.py 的模块 docstring 也明确以本函数为撤回语义的落点，删掉会让那处
-    交叉引用悬空，故保留。"""
+    调用方：order.create 在 ENFORCE_PAYMENT_DISCLAIMER=true 时用它校验
+    DOC_PAYMENT_DISCLAIMER（第五十六条第3款 支付前免责勾选），未签署者挡在下单前。
+    隐私同意走 services/consent.py 的 ensure_privacy_consent（对从未留痕的存量用户
+    fail-open），文书版本比对走 latest_agreed_version，二者语义更专用，不共用本函数。
+    仍没有服务端准入判定的是 DOC_COMMITMENT（第十二条 合规推广承诺书）：
+    consent_signed_at 只写不读，接入应对称调用本函数。"""
     rec = (await db.execute(select(ComplianceConsent).where(
         ComplianceConsent.user_id == user_id, ComplianceConsent.doc_type == doc_type)
         .order_by(ComplianceConsent.id.desc()).limit(1))).scalar_one_or_none()

@@ -77,7 +77,7 @@ class Settings(BaseSettings):
     # 仅当跨域部署（前端域名 ≠ API 域名）时必须置 none（且必须 HTTPS，否则浏览器丢弃 Secure Cookie）。
     AUTH_COOKIE_SAMESITE: str = "lax"
     # P2（代理头信任加固）：反代 → 后端的共享密钥。配置后 get_client_ip 额外要求
-    # 请求头 X-Proxy-Auth 与之匹配才信任 X-Real-IP/XFF（防止同机进程直连 127.0.0.1:8002
+    # 请求头 X-Proxy-Auth 与之匹配才信任 X-Real-IP/XFF（防止同机进程直连 127.0.0.1:8000
     # 伪造 IP 绕过限流/爆破锁定）。需在宿主 nginx 的 /api 反代段加：
     #   proxy_set_header X-Proxy-Auth "同值";
     # 留空 = 不启用该校验（保持原行为）。
@@ -142,8 +142,7 @@ class Settings(BaseSettings):
     # 客户端、也无发送/校验端点，前端也没有手机号登录入口（web/ 里的 phone 只出现在
     # 后台搜索框占位符与用户列表展示）。users.phone 列同样从未被写入过真实值
     # （全库只有注销时置 None 一处）。按本次清理口径，未建成的计划功能只标记不删；
-    # 若确定不做手机号登录，这五项连同 users.phone 列、api/common.mask_phone、
-    # 后台的手机号搜索与展示可一并下掉。
+    # 若确定不做手机号登录，这五项连同 users.phone 列、后台的用户搜索与展示可一并下掉。
     TENCENT_SMS_SECRET_ID: str = ""
     TENCENT_SMS_SECRET_KEY: str = ""
     TENCENT_SMS_SDK_APP_ID: str = ""
@@ -229,9 +228,9 @@ class Settings(BaseSettings):
     # 需要预置垂直业务商品时置 true，由对应插件的种子逻辑写入。
     SEED_VERTICAL_PRODUCTS: bool = False
     # M3①（第五十六条第3款）：支付前免责勾选的服务端闸门开关。
-    # 此前 DOC_PAYMENT_DISCLAIMER 只由前端写留痕、下单路径不校验（不勾也能付款，
-    # 见 distribution_compliance.has_signed 的待接线说明）。置 True 后 order.create 在
-    # 年龄门槛之后校验用户是否已签署支付免责，未签即拒单。
+    # 此前 DOC_PAYMENT_DISCLAIMER 只由前端写留痕、下单路径不校验（不勾也能付款）。
+    # 置 True 后 order.create 在年龄门槛之后调用 distribution_compliance.has_signed
+    # 校验用户是否已签署支付免责，未签即拒单。
     # 默认 False 保持兼容：通用底座的占位前端没有签署 UI，无条件强制会导致上线即全员
     # 无法下单；运营接好勾选前端（经 POST /consent/sign 端点、doc_type=payment_disclaimer
     # 写留痕，见 services/consent.py 的 sign）后再置 True，让「不勾也能付款」的合规缺口闭合。
@@ -245,7 +244,9 @@ class Settings(BaseSettings):
     # 档位名属业务侧文案，底座只给中性默认值；垂直业务可覆盖。
     MEMBERSHIP_TIER_NAME: dict = {"month": "月卡会员", "year": "年卡会员", "lifetime": "终身会员"}
     # 额度模型：周期总额度为各能力共享的一个总池；单能力单日上限独立计；
-    # period_days 为额度周期长度（终身每365天滚动重置）；archive_limit=0 表示档案不限。
+    # period_days 为额度周期长度（终身每365天滚动重置）。
+    # archive_limit 是历史键名（各档位可保存的条目数上限，0=不限），会员规则文案与
+    # 前端已按此键取值，保留键名以避免接口破坏。
     MEMBERSHIP_QUOTA: dict = {
         "month":    {"period_days": 30,  "period_total": 100,  "daily_per_tool": 10,  "archive_limit": 10},
         "year":     {"period_days": 365, "period_total": 1200, "daily_per_tool": 50,  "archive_limit": 50},
@@ -328,6 +329,7 @@ class Settings(BaseSettings):
     # 更要紧的是把「平台履行了告知同意义务」这张证据表本身淹掉——事后无从辨认哪条是真的。
     # 正常用户一次支付/建档最多触发两三次勾选，10 次/分钟已远超真实用量。
     RATE_LIMIT_CONSENT_PER_MIN: int = 10       # 每用户每分钟合规留痕写入次数
+    RATE_LIMIT_TOUCH_PER_HOUR: int = 60        # 每 IP 每小时推广触达上报次数（公开端点，防刷表）
     # ===== V-5 第三方计费接口全局限流 =====
     # 用户级限流可被「注册大量账号」的多账号放大器绕过（每账号都拿到自己的配额），
     # 叠加一层按 IP 的全局限流，防止一次性打爆第三方付费 API 预算。

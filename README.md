@@ -21,9 +21,13 @@ FastAPI + H5 通用应用底座：登录、支付、会员、卡券、分销、�
 
 ```bash
 cp .env.example .env
-# 修改 .env 里的 JWT_SECRET_KEY / ADMIN_TOKEN / SENSITIVE_FIELD_KEY / 数据库与 Redis 密码
+# 修改 .env 里的 JWT_SECRET_KEY / ADMIN_TOKEN / SENSITIVE_FIELD_KEY / DB_PASSWORD / REDIS_PASSWORD
 docker compose up --build -d
 ```
+
+`DB_PASSWORD` 同时用于应用连库与 MySQL 容器的账号口令，.env 里不需要也不应再写
+`MYSQL_PASSWORD`。示例文件里的 `dev-*` 口令只在开发环境可用，`APP_ENV=production`
+时启动自检会按值阻断。
 
 打开 <http://localhost:8080>，按页面提示：
 
@@ -73,7 +77,12 @@ pytest
 ```
 
 测试用内存 SQLite，不依赖 MySQL / Redis / 支付凭据。`tests/test_demo_flow.py`
-覆盖完整购买链路与越权保护。
+覆盖完整购买链路与越权保护；`tests/test_schema_consistency.py` 逐表逐列比对
+`sql/init.sql` 与 ORM（含索引覆盖），`tests/test_security_hardening.py` 锁住
+请求头注入、图片地址白名单、CSRF 来源判定等已修复的缺口。
+
+存量库升级不要重跑 `init.sql`，按顺序执行 `sql/migrations/*.sql`（幂等）；后端启动时
+还会核对一次表结构，生产环境缺表/缺列会直接拒绝启动并指名缺什么。
 
 CI（`.github/workflows/ci.yml`）四道门禁全部阻断合并：`ruff check .`、
 `pytest`、`pip-audit -r requirements.txt`、gitleaks 全历史密钥扫描。
@@ -98,7 +107,9 @@ app/
       ├─ service.py        # 下单快照、支付后交付、种子数据
       └─ router.py         # 业务接口
 web/                       # 最小演示前端（纯静态）
-nginx/ Dockerfile docker-compose.yml sql/init.sql
+nginx/ Dockerfile docker-compose.yml
+sql/init.sql               # 全量建表（仅空数据卷首启执行）
+sql/migrations/            # 存量库增量脚本（幂等，按编号执行）
 ```
 
 ## 写一个业务插件

@@ -1,20 +1,53 @@
-"""init.sql 与 ORM 模型必须描述同一套表。
+"""init.sql 与 ORM 模型必须描述同一套表与同一套列。
 
 Docker 部署用 sql/init.sql 建表（仅数据卷为空时执行），测试与 SQLite 本地开发用
 Base.metadata.create_all。两者一旦漂移，生产表结构与代码就不一致，且只在首次部署
-时暴露。这里加一道静态门禁：表名集合必须完全相同。
+时暴露。这里加两道静态门禁：表名集合、每张表的列名集合都必须完全相同。
+
+只比表名的旧版本曾放过一次真实事故：users 表缺 email/password_hash 两列，
+表名对得上、测试全绿，直到用户点「邮箱注册」才 500。列级比对才能拦住这类漂移。
 """
 import pathlib
 import re
+
+from sqlalchemy import UniqueConstraint
 
 from app.core.models import Base
 
 _INIT_SQL = pathlib.Path(__file__).resolve().parents[1] / "sql" / "init.sql"
 _CREATE_TABLE = re.compile(r"CREATE TABLE IF NOT EXISTS `?([A-Za-z0-9_]+)`?", re.IGNORECASE)
+_CREATE_TABLE_BLOCK = re.compile(
+    r"CREATE TABLE IF NOT EXISTS `?([A-Za-z0-9_]+)`?\s*\((.*?)\n\)", re.IGNORECASE | re.DOTALL)
+# 行首反引号包裹的名字既可能是列，也可能是索引/约束；后者按首关键字排除。
+_INDEX_KEYWORDS = {"PRIMARY", "UNIQUE", "KEY", "INDEX", "CONSTRAINT", "FULLTEXT", "FOREIGN", "SPATIAL"}
+_INDEX_LINE = re.compile(
+    r"^\s*(?:UNIQUE\s+|FULLTEXT\s+|SPATIAL\s+)?(?:KEY|INDEX)\s+`([A-Za-z0-9_]+)`\s*\(([^)]*)\)",
+    re.IGNORECASE | re.MULTILINE)
 
 
 def _sql_tables() -> set[str]:
     return {m.group(1) for m in _CREATE_TABLE.finditer(_INIT_SQL.read_text(encoding="utf-8"))}
+
+
+def _sql_columns() -> dict[str, set[str]]:
+    """解析 init.sql：表名 -> 列名集合（跳过 KEY/UNIQUE/INDEX/CONSTRAINT 等定义行）。"""
+    text = _INIT_SQL.read_text(encoding="utf-8")
+    tables: dict[str, set[str]] = {}
+    for m in _CREATE_TABLE_BLOCK.finditer(text):
+        table, body = m.group(1), m.group(2)
+        cols: set[str] = set()
+        for line in body.splitlines():
+            s = line.strip()
+            if not s.startswith("`"):
+                continue
+            name = s.split("`")[1]
+            rest = s[len(name) + 2:].lstrip()
+            first = rest.split(None, 1)[0].upper() if rest else ""
+            if first in _INDEX_KEYWORDS:
+                continue
+            cols.add(name)
+        tables[table] = cols
+    return tables
 
 
 def test_init_sql_matches_models():
@@ -24,3 +57,75 @@ def test_init_sql_matches_models():
     assert sql_tables, "sql/init.sql 里没有解析到任何 CREATE TABLE"
     assert model_tables - sql_tables == set(), f"模型有、init.sql 缺: {sorted(model_tables - sql_tables)}"
     assert sql_tables - model_tables == set(), f"init.sql 有、模型缺: {sorted(sql_tables - model_tables)}"
+
+
+def test_init_sql_columns_match_models():
+    sql_cols = _sql_columns()
+    assert sql_cols, "sql/init.sql 里没有解析到任何列定义"
+
+    problems = []
+    for table_name, table in Base.metadata.tables.items():
+        model_cols = {c.name for c in table.columns}
+        declared = sql_cols.get(table_name)
+        if declared is None:      # 表缺失已由上一个用例覆盖
+            continue
+        missing = sorted(model_cols - declared)
+        extra = sorted(declared - model_cols)
+        if missing:
+            problems.append(f"{table_name} 缺列（模型有、init.sql 无）: {missing}")
+        if extra:
+            problems.append(f"{table_name} 多列（init.sql 有、模型无）: {extra}")
+    assert not problems, "init.sql 与 ORM 列不一致：\n" + "\n".join(problems)
+
+
+def _sql_indexes() -> dict[str, list[tuple[str, list[str]]]]:
+    """解析 init.sql：表名 -> [(索引名, [列名...])]，含 PRIMARY KEY。"""
+    text = _INIT_SQL.read_text(encoding="utf-8")
+    out: dict[str, list[tuple[str, list[str]]]] = {}
+    for m in _CREATE_TABLE_BLOCK.finditer(text):
+        table, body = m.group(1), m.group(2)
+        entries: list[tuple[str, list[str]]] = []
+        for line in body.splitlines():
+            idx = _INDEX_LINE.match(line)
+            if idx:
+                raw = idx.group(2)
+            elif line.strip().upper().startswith("PRIMARY KEY"):
+                raw = line.strip()[len("PRIMARY KEY"):]
+            else:
+                continue
+            cols = []
+            for part in raw.strip().strip("()").split(","):
+                name = part.strip().strip("`").split("(")[0].strip().strip("`")
+                if name:
+                    cols.append(name.lower())
+            entries.append((idx.group(1) if idx else "primary", cols))
+        out[table] = entries
+    return out
+
+
+def test_init_sql_indexes_cover_models():
+    """ORM 声明的索引/唯一约束必须在 init.sql 里有对应物。
+
+    只按「覆盖列」比对而不是按索引名：init.sql 用 uk_user/uk_code 这类业务命名，
+    ORM 里 Column(unique=True, index=True) 生成的是 ix_ 前缀名，名字不同但作用等价；
+    反之 ORM 声明了索引而建表脚本没有，就是生产环境缺索引（全表扫描）。
+    """
+    sql_idx = _sql_indexes()
+    assert sql_idx, "sql/init.sql 里没有解析到任何索引定义"
+
+    problems = []
+    for table_name, table in Base.metadata.tables.items():
+        entries = sql_idx.get(table_name, [])
+        first_cols = {cols[0] for _, cols in entries if cols}
+        names = {name.lower() for name, _ in entries}
+        for col in table.columns:
+            if col.index and not col.unique and col.name.lower() not in first_cols:
+                problems.append(f"{table_name}.{col.name} 在 ORM 里 index=True，但 init.sql 无索引")
+        for idx in table.indexes:
+            cols = [c.name.lower() for c in idx.columns]
+            if cols and cols[0] not in first_cols:
+                problems.append(f"{table_name} 的索引 {idx.name}{cols} 在 init.sql 中缺失")
+        for con in table.constraints:
+            if isinstance(con, UniqueConstraint) and con.name and con.name.lower() not in names:
+                problems.append(f"{table_name} 的唯一约束 {con.name} 在 init.sql 中缺失")
+    assert not problems, "init.sql 索引与 ORM 不一致：\n" + "\n".join(problems)

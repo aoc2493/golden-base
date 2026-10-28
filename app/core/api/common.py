@@ -6,7 +6,7 @@ import logging
 from decimal import Decimal
 from fastapi import Request
 from fastapi.responses import JSONResponse
-from typing import Any, Optional
+from typing import Any
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -79,7 +79,7 @@ class AdminAuthDenied(Exception):
     于是鉴权失败也走 HTTP 200（业务码 6001）——nginx 访问日志、监控告警、WAF 看到的
     失败尝试与成功访问完全一样，令牌爆破在传输层不可观测。
     改为抛出本异常，由 main.py 统一回 HTTP 401 + code=6001：传输层可见失败，
-    前端语义不变（web/js/admin.js 已同时兼容 401/403 与 code=6001）。
+    前端语义不变（管理端前端同时兼容 HTTP 401/403 与 code=6001）。
     """
     def __init__(self, msg: str = "管理令牌无效或已被锁定"):
         super().__init__(msg)
@@ -96,7 +96,7 @@ def get_client_ip(request: Request) -> str:
     因此仅在显式声明 TRUST_PROXY_HEADERS=true（确定部署在会覆写这些头的可信反代之后）
     时才采纳代理头，否则一律用 TCP 对端地址。
 
-    P2 修复（P1 遗留面）：服务绑定 127.0.0.1:8002 且信任代理头时，同机任意进程
+    P2 修复（P1 遗留面）：服务绑定 127.0.0.1:8000 且信任代理头时，同机任意进程
     仍可直连后端并伪造 X-Real-IP 绕过全部 IP 防护。配置 PROXY_AUTH_SECRET 后，
     还要求请求携带反代注入的 X-Proxy-Auth 共享密钥（hmac 常量时间比对），
     三者齐备才信任代理头——伪造头在直连场景彻底失效。密钥不配置则维持原行为（兼容）。
@@ -269,21 +269,3 @@ def mask_account(channel: str, account: str) -> str:
     if len(account) <= 4:
         return account[0] + "***"
     return account[:2] + "****" + account[-4:]
-
-
-def mask_phone(phone: Optional[str]) -> str:
-    """【未接线·全库无调用点】手机号脱敏，与紧邻已在用的 mask_account 同一套口径。
-
-    待接线说明（本次死代码清理仅标记、未改动行为）：
-    admin.py 的用户列表与用户详情目前是原文返回 user.phone 的（而同一批字段里
-    oa_openid 取了前 10 位加 ***、real_name 与收款账号也都做了脱敏），手机号同属
-    个人信息，口径上应一并走本函数。
-    但风险当前是潜在的、非正在发生：全库只有 api/user.py 注销时的 user.phone = None
-    一处赋值，没有任何路径写入真实手机号（短信登录未建，见 config 的
-    TENCENT_SMS_* 标记），故该列恒为 NULL。一旦将来开通手机号采集，必须同步接线。"""
-    if not phone:
-        return ""
-    phone = str(phone)
-    if len(phone) >= 11:
-        return phone[:3] + "****" + phone[-4:]
-    return phone[:1] + "***" if phone else ""

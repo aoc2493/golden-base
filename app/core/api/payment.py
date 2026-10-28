@@ -1,14 +1,15 @@
 """支付路由：支付方式查询 + 微信/支付宝异步回调。
 
-历史缺陷（曾经修复）：本文件曾是占位实现——早期只把订单置为 completed，既不写
+曾有的缺陷（已修复）：本文件早期是占位实现——只把订单置为 completed，既不写
 paid_at/pay_trade_no，也不调用 fulfill_paid_order，更没有对接任何支付平台的异步回调路由。
-结果是「用户付了钱」与「发放会员/权益/报告/计佣」两段完全断开：付款后 membership 仍是
-非会员、订单 paid_at=None，且因 pay_trade_no 为空被退款判据（api/order.py 的
-_self_refund_block）拦成「无实际支付金额，无需退款」。fulfill_paid_order 因此沦为死代码。
+那时「用户付了钱」与「发放会员/权益/计佣」两段完全断开：付款后 membership 仍是非会员、
+订单 paid_at=None，且因 pay_trade_no 为空被退款判据（api/order.py 的
+_self_refund_block）拦成「无实际支付金额，无需退款」，fulfill_paid_order 从未被调用过。
 
-现补齐为完整闭环，回调入口共用同一个幂等的 _mark_order_paid：
+现为完整闭环，回调入口共用同一个幂等的 _mark_order_paid（成功后调用 fulfill_paid_order）：
   · wechat/notify   —— 微信支付 V3 异步回调（验签解密→履约，含退款回调）；
   · alipay/notify   —— 支付宝异步回调（RSA2 验签→履约）。
+主动查单兜底见 services/pay_query.py；回调与查单最终都收口到 _mark_order_paid。
 真实回调落地地址由 settings.WECHAT_NOTIFY_URL / ALIPAY_NOTIFY_URL 配置，必须分别指向上面
 两个 notify 路由（生产要求 HTTPS，见 main._startup_check 的 N9 项）。
 """

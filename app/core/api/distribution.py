@@ -13,12 +13,13 @@ from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.api.common import success, error, ErrorCode
-from app.core.auth import get_current_user
+from app.core.api.common import success, error, ErrorCode, get_client_ip, redis_rate_limit
+from app.core.auth import get_current_user, redis_client
 from app.config import settings
 from app.core.database import get_db
 from app.core.models import User, Order, CommissionLog, Withdrawal
-from app.core.schemas import WithdrawRequest
+from app.core.schemas import TouchRequest, WithdrawRequest
+from app.core.services import distribution as dist_svc
 from app.core.services.config_helper import get_bool, get_float, get_config
 from app.core.services.distribution import ensure_distributor, apply_withdrawal, build_distribution_rules, promotion_progress, DISTRIBUTION_RULE_LABELS
 from app.core.services.distribution_rank import get_top_ranking, get_my_month, rank_pool_cap
@@ -64,6 +65,25 @@ _RULE_CHANGE_NOTICE = (
 
 def _fmt(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%d %H:%M") if dt else None
+
+
+@router.post("/touch")
+async def record_touch(req: TouchRequest, request: Request,
+                       db: AsyncSession = Depends(get_db)):
+    """推广触达上报（公开）：落地页/二维码被打开时记一次，供 90 天末次触达归因。
+
+    未注册访客调用，故不依赖登录态；代价是任何人都能写 attribution_touch，
+    因此按 IP 严格限流，并且只记「邀请码存在且推广员可推广」的触达。
+    返回值不区分「邀请码不存在」与「推广员已冻结」——邀请码本身就是公开的推广链接，
+    这里再细分只会把「该码是否有效」变成可批量探测的情报。
+    """
+    if not await redis_rate_limit(redis_client, f"touch_limit:{get_client_ip(request)}",
+                                  settings.RATE_LIMIT_TOUCH_PER_HOUR, 3600):
+        return error(ErrorCode.RATE_LIMIT, "操作过于频繁，请稍后再试")
+    ok = await dist_svc.record_touch(db, req.visitor_key, req.invite_code,
+                                     ip=get_client_ip(request),
+                                     ua=request.headers.get("user-agent"))
+    return success({"recorded": bool(ok)})
 
 
 @router.get("/status")

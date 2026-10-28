@@ -14,6 +14,7 @@ from decimal import Decimal
 import pytest
 from fastapi import BackgroundTasks
 
+from app.core.api.common import to_money
 from app.core.api.payment import _mark_order_paid
 from app.core.models import Order
 
@@ -66,11 +67,9 @@ async def test_absent_amount_skips_comparison(db):
 
 
 @pytest.mark.parametrize("paid", ["39.90", "39.9", Decimal("39.90"), 39.9])
-async def test_amount_comparison_tolerates_representations(db, paid):
-    """金额的不同表示（字符串/Decimal/float/尾随零）应判定为一致，
-    否则真实回调会因格式差异被误拒。"""
-    order = await _make_order(db, amount="39.90")
-    result = await _mark_order_paid(db, order, "TRADE-1", BackgroundTasks(),
-                                    amount_paid=Decimal("1.00"))
-    # 用「不符」作对照，确保上面这些表示不会走到同一分支
-    assert result.get("reason") == "amount_mismatch"
+def test_amount_comparison_tolerates_representations(paid):
+    """金额的不同表示（字符串/Decimal/float/尾随零）必须判为一致，
+    否则真实回调会因格式差异被误拒（_mark_order_paid 的校验就建立在 to_money 上）。"""
+    assert to_money(paid) == to_money(Decimal("39.90"))
+    # 同一比较口径下，真实的金额篡改仍必须判为不一致
+    assert to_money("1.00") != to_money(Decimal("39.90"))

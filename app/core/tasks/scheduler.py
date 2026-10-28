@@ -132,9 +132,10 @@ async def auto_refund_failed_reports():
                 if existing:
                     report.retry_count = 99
                     continue
-                # 抢占订单：调度锁在 Redis 故障时「降级放行」，多 worker 部署下本任务可能被
-                # 同时执行两份；用户也可能正好在同一瞬间自助退款。不抢占就会各自新建退款单、
-                # 各向支付平台发起一笔真实退款。与 api/order.py 用户端退款同一护栏。
+                # 抢占订单：各个定时任务各持自己的调度锁，彼此之间并不互斥（自动退款与
+                # 退款重试可能同时扫到同一笔单）；用户也可能正好在同一瞬间自助退款。
+                # 不抢占就会各自新建退款单、各向支付平台发起一笔真实退款。
+                # 与 api/order.py 用户端退款同一护栏。
                 claimed = (await db.execute(
                     update(Order).where(Order.id == order.id, Order.status == "completed")
                     .values(status="refund_pending"))).rowcount
@@ -235,8 +236,8 @@ async def retry_failed_refunds():
                     refund.fail_reason = "同订单已有其他退款单在处理，停止重试"
                     logger.info(f"退款单 {refund.id} 跳过重试：订单 {order.order_no} 已有退款单 id={dup[0]}")
                     continue
-                # 抢占订单（仅 completed 时）：调度锁在 Redis 故障时是「降级放行」，多 worker
-                # 部署下本任务可能被同时执行两份，用户也可能正好在同一瞬间自助退款。
+                # 抢占订单（仅 completed 时）：自动退款与退款重试是两条任务链，各自的调度锁
+                # 不互斥，可能同时扫到同一笔单；用户也可能正好在同一瞬间自助退款。
                 # 已是 refund_pending 时不做同值 CAS——MySQL 的 affected_rows 只统计
                 # 「值真正改变的行」，同值 UPDATE 恒返回 0，会让重试永久失效。
                 if order.status == "completed":

@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 import secrets
 import time
 from contextlib import asynccontextmanager
@@ -19,7 +20,7 @@ from app.plugins import registry
 from app.core.api import invoice
 from app.core.api import favorite as favorite_api
 # 卡券模块（渠道批发卡密）：复用 JWT 鉴权与现有权益/会员表，
-# 详见 app/services/card.py 顶部「接入说明」
+# 详见 app/core/services/card.py 顶部「接入说明」
 from app.core.api import card as card_api
 from app.core.api import admin_card as admin_card_api
 from app.core.api import admin_extra as admin_extra_api
@@ -86,6 +87,11 @@ async def lifespan(app: FastAPI):
         raise
     if settings.DB_TYPE == "sqlite":
         await _init_sqlite_schema()
+    else:
+        # MySQL 的表结构由 sql/init.sql + sql/migrations/ 维护（初始化脚本只在空数据卷
+        # 首次启动时执行）。存量库升级时若漏跑增量脚本，ORM 声明的列在库里并不存在，
+        # 故障要等到用户真的走到那条 SQL 才以 500 暴露——这里在启动期一次性拦下。
+        await _verify_schema()
     await _seed_base_data()
     start_scheduler()
     yield
@@ -180,6 +186,12 @@ def _startup_check():
         for _name, _sample in _SAMPLE_SECRET_VALUES.items():
             if getattr(settings, _name, "") == _sample:
                 errors.append(f"{_name} 仍是 .env.example 的示例值，生产环境必须替换")
+        # 基础设施口令同理：docker-compose 直接把 .env 的这两个值注入 mysql/redis 容器，
+        # 照抄示例文件上线等于用全仓库公开的库口令。非生产不拦，保证 cp .env.example .env 可用。
+        if settings.DB_TYPE == "mysql" and settings.DB_PASSWORD == "dev-db-password-change-me":
+            errors.append("DB_PASSWORD 仍是 .env.example 的示例值，生产环境必须替换")
+        if settings.REDIS_PASSWORD == "dev-redis-password-change-me":
+            errors.append("REDIS_PASSWORD 仍是 .env.example 的示例值，生产环境必须替换")
         if not settings.cors_origins_list:
             errors.append("生产环境必须配置 CORS_ORIGINS（H5 前端域名），禁止放行所有来源")
         # N9：支付回调必须 HTTPS
@@ -220,11 +232,11 @@ def _startup_check():
         if settings.ADMIN_OPERATE_PASSWORD and len(settings.ADMIN_OPERATE_PASSWORD.strip()) < 8:
             warns.append("ADMIN_OPERATE_PASSWORD 长度不足 8 位，生产建议使用更强操作密码")
         # P5：信任反代头但未配共享密钥 → 同机任何进程（运维脚本、容器内副服务、被渗透的旁路
-        # 容器）都可直连 127.0.0.1:8002 并伪造 X-Real-IP，从而绕过 IP 维度限流、管理端爆破锁定、
+        # 容器）都可直连 127.0.0.1:8000 并伪造 X-Real-IP，从而绕过 IP 维度限流、管理端爆破锁定、
         # 以及将来任何基于 IP 的安全策略。不阻断（同上：合理部署可能确实不配密钥），用最高告警。
         if settings.TRUST_PROXY_HEADERS and not (settings.PROXY_AUTH_SECRET or "").strip():
             _msg = ("TRUST_PROXY_HEADERS=true 但 PROXY_AUTH_SECRET 未配置：同机进程可直连 "
-                    "127.0.0.1:8002 并伪造 X-Real-IP，绕过 IP 维度限流与管理端爆破锁定；"
+                    "127.0.0.1:8000 并伪造 X-Real-IP，绕过 IP 维度限流与管理端爆破锁定；"
                     "请配置密钥并让反向代理注入 X-Proxy-Auth 头（至少 32 位随机串）")
             if settings.SECURITY_STRICT_IP_POLICY:
                 errors.append(_msg + "（SECURITY_STRICT_IP_POLICY=true，已升级为阻断项）")
@@ -237,6 +249,20 @@ def _startup_check():
             advisories.append("生产环境未接入告警通道（ALERT_WECOM_WEBHOOK / ALERT_DINGTALK_WEBHOOK 未配），"
                               "退款重试耗尽、掉单金额不符、对账差错等 ERROR 仅落容器 stdout，"
                               "需人工轮询日志才能发现（建议配企业微信或钉钉群机器人）")
+        # 合规缺口：默认关闭是为了不阻断开箱即用的演示，但生产上线必须由运营逐项确认。
+        # 这些不是代码缺陷（能力已实现且有留痕表），而是「开关尚未打开」的法定义务缺口，
+        # 每次启动都留一条 ERROR 级记录，避免它在无数次发布中被悄悄遗忘。
+        if not settings.ENFORCE_PAYMENT_DISCLAIMER:
+            advisories.append("ENFORCE_PAYMENT_DISCLAIMER=false：下单不校验支付前免责勾选的服务端留痕，"
+                              "「不勾也能付款」；接入勾选 UI 后请置 true 闭合告知义务")
+        if not settings.WITHDRAW_TAX_ENABLED:
+            advisories.append("WITHDRAW_TAX_ENABLED=false：推广佣金提现不代扣个人所得税，"
+                              "平台仍须自行履行代扣代缴/申报义务")
+        advisories.append("年龄门槛（原 A8 成年声明/监护同意）已按属主决策于 2026-09-11 关闭："
+                          "minor_guard.gate_payer/gate_bio 恒放行，下单与建档不再做未成年人拦截；"
+                          "若业务面向未成年人不可及场景，需在运营侧另做限制")
+        advisories.append("设备码登录（POST /api/auth/login 传 device_code）为长期有效凭证："
+                          "持码即可登录对应账号，无有效期与二次校验；请勿把设备码当作对外可分享的入口")
     elif settings.PAYMENT_MOCK:
         # 非生产里的模拟支付是刻意开启的演示能力，但一旦这台机器被当测试环境给外部访问，
         # 任何人注册后都能免费拿到全部商品。每次启动都留一条醒目记录，便于事后追溯。
@@ -265,90 +291,112 @@ async def _init_sqlite_schema():
     logger.info("SQLite 表结构已就绪")
 
 
-async def _seed_base_data():
-    """商品与系统配置种子（仅表为空时写入）。
+async def _verify_schema():
+    """启动期结构校验：ORM 声明的每张表、每一列都必须真实存在。
+
+    只读检查，不改库。缺表/缺列时：生产环境拒绝启动（否则是「服务起来了、用户一点就 500」），
+    非生产环境打 ERROR 日志继续跑（本地旧库仍可调试）。修复口径写在 sql/migrations/：
+    初始化脚本 sql/init.sql 只在空数据卷首次启动时执行，存量库必须手工跑增量脚本。
+    """
+    from sqlalchemy import inspect
+    from app.core.database import engine, Base
+    from app.core import models  # noqa: F401 确保全部模型注册到 metadata
+
+    def _collect_missing(conn):
+        insp = inspect(conn)
+        existing = set(insp.get_table_names())
+        missing = {}
+        for table in Base.metadata.sorted_tables:
+            if table.name not in existing:
+                missing[table.name] = ["<整表缺失>"]
+                continue
+            present = {c["name"] for c in insp.get_columns(table.name)}
+            absent = [c.name for c in table.columns if c.name not in present]
+            if absent:
+                missing[table.name] = absent
+        return missing
+
+    async with engine.connect() as conn:
+        missing = await conn.run_sync(_collect_missing)
+    if not missing:
+        return
+    detail = "；".join(f"{t}({', '.join(cols)})" for t, cols in sorted(missing.items()))
+    msg = (f"数据库结构与代码不一致，缺少 {detail}。"
+           "存量库请按顺序执行 sql/migrations/ 下的增量脚本后再启动")
+    if _is_prod_env():
+        logger.critical("[启动自检-阻断项] %s", msg)
+        raise RuntimeError(msg)
+    logger.error("[结构校验] %s（非生产环境继续启动）", msg)
+
+
+async def _seed_base_data(db=None):
+    """商品与系统配置种子（缺什么补什么，绝不覆盖已有行）。
 
     通用底座只播种会员档位这类与底座能力直接对应的商品；
     垂直业务商品由 SEED_VERTICAL_PRODUCTS 开关控制，默认不播种。
     定价与 sql/init.sql 保持一致。
+
+    **只补不覆盖**：已存在的商品行一个字都不动。运营改过的价格/文案/排序、
+    主动下架的档位，都必须活过重启——这也是当初把「同步到规则口径」删掉的唯一原因，
+    要收敛存量口径请写 sql/migrations/ 的增量脚本，而不是在启动钩子里改数据。
     """
     from sqlalchemy import select
     from app.core.database import AsyncSessionLocal
     from app.core.models import Product, SystemConfig
-    async with AsyncSessionLocal() as db:
-        has_product = (await db.execute(select(Product.id).limit(1))).scalar_one_or_none()
-        if not has_product:
-            # 通用底座只播种会员档位；具体业务能力商品由 app/plugins/<业务>/ 的
-            # manifest 声明，经注册表在下单链路按能力码动态取价，不在此预置。
-            seeds = [
-                Product(sku_code="vip_month", product_type="membership", feature="vip",
-                        name="月卡会员", description="开通起30天：会员权益、周期总额度100次、单能力单日10次",
-                        price="99.00", refund_rule="虚拟内容服务，支付后7天内未使用可联系客服退款",
-                        sort_order=1, enabled=1),
-                Product(sku_code="vip_year", product_type="membership", feature="vip",
-                        name="年卡会员", description="开通起365天：会员权益、周期总额度1200次、单能力单日50次、优先客服",
-                        price="299.00", refund_rule="虚拟内容服务，支付后7天内未使用可联系客服退款",
-                        sort_order=2, enabled=1),
-                Product(sku_code="vip_lifetime", product_type="membership", feature="vip",
-                        name="终身会员", description="平台运营期内永久：会员权益、每365天周期总额度3000次、单能力单日100次、最高优先客服",
-                        price="599.00", refund_rule="虚拟内容服务，支付后7天内未使用可联系客服退款",
-                        sort_order=3, enabled=1),
-            ]
-            db.add_all(seeds)
-            logger.info("已写入通用商品种子数据（会员档位）")
 
-        # 会员商品幂等同步到 V1.3（老库不跑历史迁移脚本也能收敛）：
-        # 补插 vip_year；将 vip_month/vip_lifetime 的名称/描述/定价/排序同步到规则口径。
-        # 只改商品定义，不动任何已支付订单（第七条第4款：调价不溯及已支付订单）。
+    own_session = db is None
+    if own_session:
+        db = AsyncSessionLocal()
+    try:
+        # 通用底座只播种会员档位；具体业务能力商品由 app/plugins/<业务>/ 的
+        # manifest 声明，经注册表在下单链路按能力码动态取价，不在此预置。
         vip_specs = {
             "vip_month": ("月卡会员", "99.00", 1,
                           "开通起30天：会员权益、周期总额度100次、单能力单日10次"),
             "vip_year": ("年卡会员", "299.00", 2,
                          "开通起365天：会员权益、周期总额度1200次、单能力单日50次、优先客服"),
             "vip_lifetime": ("终身会员", "599.00", 3,
-                             "平台运营期内永久：会员权益、每365天周期总额度3000次、单能力单日100次、最高优先客服"),
+                             "平台运营期内永久：每365天周期总额度3000次、单能力单日100次、最高优先客服"),
         }
         for sku, (nm, price, sort, desc) in vip_specs.items():
-            row = (await db.execute(select(Product).where(Product.sku_code == sku))).scalar_one_or_none()
+            row = (await db.execute(select(Product.id).where(Product.sku_code == sku))).scalar_one_or_none()
             if row is None:
                 db.add(Product(sku_code=sku, product_type="membership", feature="vip",
                                name=nm, description=desc, price=price,
                                refund_rule="虚拟内容服务，支付后7天内未使用可联系客服退款",
                                sort_order=sort, enabled=1))
                 logger.info("已补插会员商品 %s（%s）", sku, price)
-            else:
-                row.name, row.price, row.sort_order, row.description, row.enabled = nm, price, sort, desc, 1
         # 会员权益简述（会员中心「会员权益」展示）：文案不再写死工具数量，
         # 新增会员工具后无需同步改文案；完整会员规则由 /api/membership/rules 下发。
-        vip_benefits_v13 = [
+        vip_benefits = [
             "会员期内解锁全部业务能力（具体能力清单由已接入的业务插件提供）",
-            "周期总额度池全部能力共享，历史报告可查（具体额度见会员规则）",
+            "周期总额度池全部能力共享，历史记录可查（具体额度见会员规则）",
             "优先客服与新能力优先体验",
         ]
-        has_cfg = (await db.execute(select(SystemConfig.id).limit(1))).scalar_one_or_none()
-        if not has_cfg:
-            cfgs = [
-                SystemConfig(config_key="paid_reports_enabled", config_value=True),
-                SystemConfig(config_key="refund_enabled", config_value=True),
-                SystemConfig(config_key="distribution_enabled", config_value=True),
-                SystemConfig(config_key="announcement", config_value=""),
-                SystemConfig(config_key="vip_benefits", config_value=vip_benefits_v13),
-            ]
-            db.add_all(cfgs)
-            logger.info("已写入系统配置种子数据")
-        else:
-            # 全新通用底座不含任何遗留业务文案，无需 vip_benefits 迁移；
-            # 既有库的运营自定义值一律保留不覆盖。
-            pass
-        # ===== 业务插件种子（可选钩子）=====
-        # 通用底盘不认识任何具体业务；插件若声明 seed_data(db) 则由启动流程调用，
-        # 用于把自己的可售商品写进 products 表（价源仍以 manifest 为准）。
+        # 系统配置同样逐键补齐：原实现是「表里有一行就整体跳过」，
+        # 运营手工加过任意一条（如公告）后，其余缺省键就永远不再落库。
+        cfg_defaults = {
+            "paid_reports_enabled": True,
+            "refund_enabled": True,
+            "distribution_enabled": True,
+            "announcement": "",
+            "vip_benefits": vip_benefits,
+        }
+        existing_keys = set((await db.execute(select(SystemConfig.config_key))).scalars().all())
+        for _key, _val in cfg_defaults.items():
+            if _key not in existing_keys:
+                db.add(SystemConfig(config_key=_key, config_value=_val))
+                logger.info("已补插系统配置 %s", _key)
+        # 业务插件种子（可选钩子）：插件把自己的可售商品写进 products 表
         for _entry in registry.plugins.values():
             _seeder = getattr(_entry.service, "seed_data", None)
             if _seeder is not None:
                 await _seeder(db)
                 logger.info("插件 %s 已执行 seed_data", _entry.name)
         await db.commit()
+    finally:
+        if own_session:
+            await db.close()
 
 
 app = FastAPI(
@@ -377,19 +425,24 @@ app.add_middleware(
                    "X-CSRF-Token", "X-Admin-Token", "X-Request-ID"],
 )
 
-# gzip：js/regions.js 由「省-市」两级扩到「省-市-区县」三级后体积涨到 145KB
-# （34 省 / 344 市 / 2870 区县，每级都带政府驻地经纬度），纯文本压缩率约 4:1。
-# 开发态尤其必要：下面的 _static_no_cache 对所有非 /api 路径下发 no-store，
-# 浏览器不缓存，每次打开页面都要全量重传这个文件。
+# gzip：体积最大的静态资源是 js 目录下的行政区划数据（省-市-区县三级，约 145KB 纯文本，
+# 压缩率约 4:1）。开发态尤其必要：下面的 _static_no_cache 对所有非 /api 路径下发 no-store，
+# 浏览器不缓存，每次打开页面都要全量重传这些文件。
 # 生产由 nginx 提供静态资源时这段不生效（WEB_ROOT 为空），压缩在 nginx.conf 里配。
 # minimum_size=1024：更小的响应压缩头本身就有 20 余字节，压了反而变大。
 app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 
 # 链路追踪中间件：复用上游传入的 X-Request-ID（便于网关/前端串联），否则生成新的。
+# 复用前必须收窄字符集与长度：该值会原样回写响应头并进全链路日志，
+# 客户端可控的任意串等于给日志投毒（伪造行、塞超长内容撑爆日志）。
+_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+
+
 @app.middleware("http")
 async def request_id_middleware(request: Request, call_next):
-    rid = request.headers.get("X-Request-ID") or uuid.uuid4().hex[:16]
+    incoming = (request.headers.get("X-Request-ID") or "").strip()
+    rid = incoming if _REQUEST_ID_RE.match(incoming) else uuid.uuid4().hex[:16]
     token = _request_id_var.set(rid)
     try:
         response = await call_next(request)
@@ -497,7 +550,6 @@ class CSRFMiddleware:
 
     SAFE_METHODS = {"GET", "HEAD", "OPTIONS", "TRACE"}
     SERVER_CALLBACK_PATHS = ("/api/payment/wechat/notify", "/api/payment/alipay/notify")
-    TOKEN_EXEMPT_PATHS = ("/login", "/register", "/forgot", "/health")
 
     def __init__(self, app):
         self.app = app
@@ -517,17 +569,15 @@ class CSRFMiddleware:
 
         headers = dict(scope.get("headers", []))
 
-        if path.startswith("/api"):
+        if path.startswith("/api") or path == "/health":
+            # /health 只读（GET 已在上方放行），此处仅为兼容探活工具的 POST 探针：
+            # 它无 Cookie 会话、无状态变更，不构成 CSRF 面。
             if (path in self.SERVER_CALLBACK_PATHS
                     or self._has_bearer(headers)
                     or self._origin_ok(headers)):
                 await self.app(scope, receive, send)
                 return
             await self._reject(scope, receive, send, "跨站请求来源校验失败")
-            return
-
-        if path.startswith(self.TOKEN_EXEMPT_PATHS):
-            await self.app(scope, receive, send)
             return
 
         # 双提交 Cookie：Cookie 里的 csrf_token 与 Header 里的 X-CSRF-Token 必须一致
@@ -555,21 +605,36 @@ class CSRFMiddleware:
 
     @staticmethod
     def _origin_ok(headers: dict) -> bool:
-        """Origin/Referer 的 host:port 是否等于请求 Host 或落在 CORS 白名单内。"""
+        """Origin（缺失时回退 Referer）是否为本站来源或落在 CORS 白名单内。
+
+        · 同站：scheme 必须为 http/https 且 netloc 等于请求 Host（反代终止 TLS 时
+          Origin 是 https 而 Host 不带 scheme，故此处只比 netloc）；
+        · 白名单：按「scheme://netloc」完整比对——只比 netloc 会让 http://a.com 顺带
+          放行 https://a.com，混部协议时等于把不同源当成同源。
+        """
         source = headers.get(b"origin") or headers.get(b"referer") or b""
         try:
             parsed = urlsplit(source.decode("latin-1"))
         except ValueError:
             return False
-        # "null"（沙箱 iframe）解析后 scheme/netloc 为空，按跨站处理
-        if not parsed.scheme or not parsed.netloc:
+        # "null"（沙箱 iframe / file://）解析后 scheme/netloc 为空，按跨站处理
+        scheme = (parsed.scheme or "").lower()
+        netloc = (parsed.netloc or "").lower()
+        if scheme not in ("http", "https") or not netloc:
             return False
-        target = parsed.netloc.lower()
         host = headers.get(b"host", b"").decode("latin-1").strip().lower()
-        if host and secrets.compare_digest(target, host):
+        if host and secrets.compare_digest(netloc, host):
             return True
-        return any(target == urlsplit(o).netloc.lower()
-                   for o in settings.cors_origins_list if "://" in o)
+        origin = f"{scheme}://{netloc}"
+        for entry in settings.cors_origins_list:
+            try:
+                allowed = urlsplit(entry)
+            except ValueError:
+                continue
+            if allowed.scheme.lower() in ("http", "https") and allowed.netloc:
+                if origin == f"{allowed.scheme.lower()}://{allowed.netloc.lower()}":
+                    return True
+        return False
 
     def _extract_csrf_token(self, cookie_header: str) -> str:
         """从 Cookie 中提取 csrf_token"""
@@ -657,15 +722,18 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException):
 
 # 统一 pydantic 参数校验失败（HTTP 422）响应体为 {code,msg,data}。
 # 起因：FastAPI 默认对 RequestValidationError 只回 {"detail":[{type,loc,msg,ctx}]}
-# 这种结构，而全站前端只认 code/msg，于是「密码长度不能少于 8 位」「充值不得小于 1 元」
+# 这种结构，而全站前端只认 code/msg，于是「密码长度不能少于 8 位」「邮箱格式不正确」
 # 这些后端早已写好的精确中文提示被 pydantic 抢先，用户只能看到兜底的「提交失败，请稍后重试」，
 # 甚至去猜“是不是服务挂了”。这里把 detail 翻成人能读的一句话，同时保留 422 状态码
 # （传输层监控仍可区分“参数错”与“服务错”，不改变现有 HTTP 语义）。
 _FIELD_LABELS = {
     "password": "密码", "email": "邮箱", "code": "验证码", "name": "姓名",
-    "contact": "联系方式", "content": "留言内容", "amount_cents": "充值金额",
-    "channel": "支付渠道", "endpoint": "接口端点", "params": "调用参数",
-    "key_id": "密钥", "nickname": "昵称", "purpose": "用途",
+    "contact": "联系方式", "content": "留言内容", "channel": "支付渠道",
+    "nickname": "昵称", "purpose": "用途", "invite_code": "邀请码",
+    "amount": "提现金额", "account_name": "收款人姓名", "account_no": "收款账号",
+    "order_id": "订单", "reason": "原因", "title": "发票抬头", "tax_no": "纳税人识别号",
+    "doc_type": "文件类型", "platform": "平台", "birth_date": "出生日期",
+    "operate_password": "操作密码",
 }
 
 
@@ -684,17 +752,11 @@ def _friendly_validation_error(errors) -> str:
         elif etype == "string_too_long":
             parts.append(f"{label}长度不能超过 {ctx.get('max_length', '')} 位")
         elif etype in ("greater_than_equal", "greater_than"):
-            if field == "amount_cents":
-                parts.append("充值金额不能少于 1 元")
-            else:
-                key = "ge" if etype == "greater_than_equal" else "gt"
-                parts.append(f"{label}不能小于 {ctx.get(key, '')}")
+            key = "ge" if etype == "greater_than_equal" else "gt"
+            parts.append(f"{label}不能小于 {ctx.get(key, '')}")
         elif etype in ("less_than_equal", "less_than"):
-            if field == "amount_cents":
-                parts.append("单笔充值金额不能超过 1 万元")
-            else:
-                key = "le" if etype == "less_than_equal" else "lt"
-                parts.append(f"{label}不能大于 {ctx.get(key, '')}")
+            key = "le" if etype == "less_than_equal" else "lt"
+            parts.append(f"{label}不能大于 {ctx.get(key, '')}")
         elif etype in ("value_error", "assert_failed", "model_attributes_type", "dict_type"):
             parts.append(str(e.get("msg") or f"{label}格式不正确"))
         elif etype == "string_pattern_mismatch":

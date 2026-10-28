@@ -7,26 +7,21 @@ feature+biz_key 有效权益），本路由只做参数归一与结果透传。
 
 能力清单（feature 是否合法、sides 如何派生 biz_key）全部来自插件，core 零业务分支。
 """
-from typing import Optional
 from fastapi import APIRouter, Depends
-from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.auth import get_current_user
 from app.core.api.common import success, error, ErrorCode
 from app.core.database import get_db
 from app.core.models import User
+from app.core.schemas import EntitlementCheckRequest
 from app.core.services.entitlement import check_feature
 from app.plugins import registry
 
 router = APIRouter(prefix="/entitlement", tags=["权益"])
 
 
-class EntitlementCheckRequest(BaseModel):
-    feature: str
-    biz_key: Optional[str] = None
-    # 需要服务端派生 biz_key 的能力专用：上送原始 sides（如双人内容双方出生信息）
-    sides: Optional[list] = None
-    relation: Optional[str] = None
+# 入参模型统一在 schemas 里定义（feature 白名单正则 + sides 4KB 上限），
+# 路由层不得再复制一份——两处定义漂移时，丢掉的是校验而不是重复代码。
 
 
 @router.post("/check")

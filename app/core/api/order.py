@@ -153,9 +153,9 @@ async def create_order(req: OrderCreateRequest, request: Request,
         code, msg, data = gate
         return error(code, msg, data)
 
-    # M3①（第五十六条第3款）：支付前免责勾选的服务端闸门。此前 DOC_PAYMENT_DISCLAIMER
-    # 只由前端 sign() 写留痕、下单路径不校验，不勾也能付款（见 distribution_compliance.has_signed
-    # 的待接线说明）。默认由 ENFORCE_PAYMENT_DISCLAIMER=False 关闭以兼容无签署 UI 的占位前端；
+    # M3①（第五十六条第3款）：支付前免责勾选的服务端闸门。留痕由前端经
+    # POST /consent/sign 写入 DOC_PAYMENT_DISCLAIMER，此处校验最新一行是否为已同意。
+    # 默认由 ENFORCE_PAYMENT_DISCLAIMER=False 关闭以兼容无签署 UI 的占位前端；
     # 运营接好勾选前端后置 True，未签署者即被挡在下单前。放在年龄门槛之后、商品查询之前，
     # 与隐私/年龄两道前置门同序（都是「该不该让你下单」的判定，先于任何计费/库存查询）。
     if settings.ENFORCE_PAYMENT_DISCLAIMER:

@@ -800,7 +800,11 @@ async def email_register(req: EmailRegisterRequest, request: Request,
     # 只在日志留痕，对外给中性文案。
     # 注意：注册成功必然要下发 token，「成功/失败」本身仍可区分，彻底消除枚举需要
     # 邮箱验证码（未接入邮件服务前做不到）——本修复消除的是「明确告知已注册」这层。
-    exists = (await db.execute(select(User).where(User.email == email))).scalar_one_or_none()
+    # 用 scalars().first() 而非 scalar_one_or_none()：uk_users_email 是后加的
+    # （sql/migrations/0001），未跑迁移的存量库上同一个邮箱可能存在多行，
+    # 命中多行会抛 MultipleResultsFound，把「注册/登录」直接变成 500。
+    exists = (await db.execute(
+        select(User.id).where(User.email == email).order_by(User.id).limit(1))).scalars().first()
     if exists:
         logger.info("邮箱注册命中已存在账号 ip=%s", get_client_ip(request))
         return error(ErrorCode.PARAM_ERROR, "该邮箱无法完成注册，请更换邮箱或直接登录")
@@ -838,8 +842,10 @@ async def email_login(req: EmailLoginRequest, request: Request,
                                   _LOGIN_LIMIT, _LOGIN_WINDOW):
         return error(ErrorCode.RATE_LIMIT, "操作过于频繁，请稍后再试")
 
+    # 同上：存量库可能无 uk_users_email，取最早一行避免 MultipleResultsFound
     user = (await db.execute(
-        select(User).where(User.email == email, User.status == 1))).scalar_one_or_none()
+        select(User).where(User.email == email, User.status == 1)
+        .order_by(User.id).limit(1))).scalars().first()
     if not user or not _verify_password(req.password, user.password_hash):
         return error(ErrorCode.PARAM_ERROR, "邮箱或密码错误")
 
@@ -869,7 +875,7 @@ async def password_reset_request(req: PasswordResetRequest, request: Request,
         return error(ErrorCode.RATE_LIMIT, "操作过于频繁，请稍后再试")
 
     user = (await db.execute(
-        select(User).where(User.email == email))).scalar_one_or_none()
+        select(User.id).where(User.email == email).order_by(User.id).limit(1))).scalars().first()
     logger.info(f"密码重置申请 email_exists={bool(user)} ip={get_client_ip(request)}")
     return success({
         "submitted": True,

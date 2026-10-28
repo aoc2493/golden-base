@@ -82,7 +82,7 @@ class ResultCache(Base):
     cache_key = Column(String(64), nullable=False)
     input_data = Column(JSON, nullable=False)
     result_data = Column(JSON, nullable=False)
-    api_source = Column(String(32), default="jumei")
+    api_source = Column(String(32), default="internal", comment="结果来源标识，由插件侧自行约定")
     created_at = Column(DateTime, default=datetime.now, server_default=func.now())
     expire_at = Column(DateTime, nullable=False)
 
@@ -99,19 +99,19 @@ class ResultCache(Base):
 
 
 class Favorite(Base):
-    """v19 收藏表：档案/报告的用户收藏。
+    """用户收藏表：收藏任意业务条目（条目类型由插件登记）。
 
-    删除语义（属主需求）：源条目在档案页被删除后，收藏仍保留——
-    因此收藏行自带 title/sub 展示快照与 payload 档案快照，源被软删/
-    物理缺失时收藏页仍能展示信息；报告源为软删（行保留）故仍可打开。"""
+    删除语义：源条目被删除后，收藏仍保留——
+    因此收藏行自带 title/sub 展示快照与 payload 业务快照，源被软删/
+    物理缺失时收藏页仍能展示信息；源为软删（行保留）时仍可打开。"""
     __tablename__ = "favorites"
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     user_id = Column(BigInteger, nullable=False)
-    item_type = Column(String(16), nullable=False, comment="archive/report")
-    item_id = Column(BigInteger, nullable=False, comment="archive id 或 order id")
+    item_type = Column(String(16), nullable=False, comment="插件登记的收藏类型")
+    item_id = Column(BigInteger, nullable=False, comment="业务条目 id 或订单 id")
     title = Column(String(100), nullable=True)
     sub = Column(String(200), nullable=True)
-    payload = Column(JSON, nullable=True, comment="archive 快照；report 为 NULL")
+    payload = Column(JSON, nullable=True, comment="业务条目快照；订单类收藏为 NULL")
     created_at = Column(DateTime, default=datetime.now, server_default=func.now())
 
 
@@ -133,6 +133,12 @@ class Product(Base):
 
 class Order(Base):
     __tablename__ = "orders"
+    __table_args__ = (
+        # 用户侧「我的订单」与后台列表按 user_id 过滤；关单/查单/对账任务按
+        # (status, created_at) 扫描。orders 是增长最快的一张表，缺索引即全表扫描。
+        Index("ix_orders_user_id", "user_id"),
+        Index("ix_orders_status_created", "status", "created_at"),
+    )
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     order_no = Column(String(32), unique=True, nullable=False)
     user_id = Column(BigInteger, nullable=False)
@@ -709,10 +715,8 @@ class InvoiceRequest(Base):
 #     独立版模型缺列 → 写入直接 1364；
 #   · 会员流水本库是单数 membership_ledger，独立版是复数 membership_ledgers；
 #   · user_entitlements 本库 feature varchar(20)、biz_key varchar(64)、order_id NOT NULL。
-# 详见 app/services/card.py 顶部说明。
+# 详见 app/core/services/card.py 顶部说明。
 # ============================================================
-# 防御性导入：本文件顶部若未导入 UniqueConstraint，这里补上（重复导入无副作用）
-from sqlalchemy import UniqueConstraint  # noqa: E402
 
 
 class CardBatch(Base):

@@ -57,6 +57,8 @@ EXPOSE 8000
 
 # L3（审计修复）：容器僵死/未监听端口时 docker 自动重启。
 # 用 python urllib 探 /health，无需引入 curl（保持镜像精简）。
+# 退出码即健康判据：urllib 抛异常时 python 自身以非 0 退出，无需再追加 `|| exit 1`
+# （原写法在 shell form 下与不加完全等价，是死代码）。
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
-    CMD python -c "import urllib.request,sys; r=urllib.request.urlopen('http://127.0.0.1:8000/health',timeout=3); sys.exit(0 if r.status==200 else 1)" || exit 1
+    CMD python -c "import urllib.request,sys; r=urllib.request.urlopen('http://127.0.0.1:8000/health',timeout=3); sys.exit(0 if r.status==200 else 1)"
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

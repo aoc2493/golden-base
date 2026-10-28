@@ -51,35 +51,6 @@ async def get_user_info(db: AsyncSession = Depends(get_db), user: User = Depends
     return success({"nickname": user.nickname, "avatar_url": user.avatar_url, "id": user.id})
 
 
-def _allowed_avatar_url(url: str) -> bool:
-    """头像 URL 白名单：只接受「站内相对路径」与「已配置的对象存储域名」。
-
-    【安全审计修复】原实现把前端传入的任意字符串直接落库：可填 javascript:/data: URI
-    （前端一旦用 href/innerHTML 渲染即为存储型 XSS）、任意外站地址（追踪像素、钓鱼图、
-    盗链），也让「头像」变成可被引用的任意 URL 字段。头像只可能来自两条链路——
-    /upload/avatar 与微信头像拉取，两者产出的 URL 形态只有下面两类，故可白名单化。
-    """
-    u = (url or "").strip()
-    if not u:
-        return True                      # 允许清空头像
-    if u.startswith("//") or "\\" in u:
-        return False                     # 协议相对外站 / 反斜线变形
-    if "://" not in u:
-        # 站内相对路径：必须是站内的单斜线绝对路径，禁止目录穿越
-        return u.startswith("/") and ".." not in u
-    from urllib.parse import urlparse
-    p = urlparse(u)
-    if p.scheme not in ("http", "https"):
-        return False                     # javascript:/data:/file: 一律拒绝
-    host = (p.hostname or "").lower()
-    allowed = {
-        (settings.COS_CDN_DOMAIN or "").split("://")[-1].split("/")[0].lower(),
-        f"{settings.COS_BUCKET}.cos.{settings.COS_REGION}.myqcloud.com".lower(),
-    }
-    allowed.discard("")
-    return bool(host) and (host in allowed or any(host.endswith("." + a) for a in allowed))
-
-
 @router.put("/info")
 async def update_user_info(req: UserUpdateRequest, db: AsyncSession = Depends(get_db),
                            user: User = Depends(get_current_user)):
@@ -94,8 +65,9 @@ async def update_user_info(req: UserUpdateRequest, db: AsyncSession = Depends(ge
         warned = bool(sw.get("warned"))
         user.nickname = nickname
     if req.avatar_url is not None:
-        if not _allowed_avatar_url(req.avatar_url):
-            return error(ErrorCode.PARAM_ERROR, "头像地址不合法，请通过上传功能设置头像")
+        # 白名单校验在 UserUpdateRequest._v_avatar 里完成（含站内相对路径 / COS 域名 /
+        # 反斜线与伪协议拦截）。这里不再重复一份判断——两处口径一旦漂移，
+        # 失效的总是先被绕过的那一处。
         user.avatar_url = req.avatar_url.strip()
     await db.flush()
     return success({"nickname": user.nickname, "avatar_url": user.avatar_url},

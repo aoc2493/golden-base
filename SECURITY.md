@@ -17,7 +17,9 @@
 
 - 启动自检 fail-closed：`JWT_SECRET_KEY`、`ADMIN_TOKEN`、`SENSITIVE_FIELD_KEY`
   缺失、过短或仍是 `.env.example` 的示例值时拒绝启动；生产环境额外校验 CORS、
-  管理二次密码、AI 标识主体等。
+  管理二次密码、AI 标识主体，并逐值拦下 `DB_PASSWORD` / `REDIS_PASSWORD` 的示例口令。
+- 启动期结构校验：`information_schema` 与 ORM 逐表逐列比对，生产环境缺列直接拒绝启动
+  （避免「服务起来了、用户一点就 500」）；存量库修复走 `sql/migrations/`。
 - `PAYMENT_MOCK=true` 仅允许非生产环境；生产环境启动即拒绝，接口本身也返回 403。
 - 支付回调：验签（微信 APIv3 平台证书/公钥 + 5 分钟时间戳窗口；支付宝 RSA2）+
   金额校验 + 幂等 + CAS 原子履约，防止重放与并发超发。
@@ -30,6 +32,9 @@
 - 上传：content-type 白名单 + 文件头魔数 + 流式体积上限 + 像素上限；全局请求体上限 8MB。
 - 限流、管理端 IP 白名单、管理令牌爆破锁定、审计日志均内置于 core；
   Redis 故障时的降级方向由 `REDIS_FAIL_CLOSED` 决定（默认拦截）。
+- 响应头与地址类入参：`X-Request-ID` 只接受 `[A-Za-z0-9._-]{1,64}`，其余一律重新生成
+  （防止反射注入与日志投毒）；头像/反馈图地址只接受站内相对路径或配置的 COS/CDN 域名；
+  推广触达上报（公开端点）按 IP 限流，非法邀请码不落库。
 
 ## 插件的信任边界
 
@@ -50,6 +55,12 @@
 - `docker-compose.yml` 的镜像标签是可覆盖的次版本标签（`mysql:8.0` 等），不是 digest。
   强可复现性要求下，请把 `MYSQL_IMAGE` / `REDIS_IMAGE` / `NGINX_IMAGE` / `PYTHON_IMAGE`
   固定为 `@sha256:` 摘要。
+- 设备码登录（`POST /api/auth/login` 传 `device_code`）是长期有效凭证：持码即可登录对应
+  账号，没有有效期与二次校验。设备码视同密码保管，不要放进可分享的链接或截图。
+- 年龄门槛（原 A8 成年声明/监护人同意）按属主决策于 2026-09-11 关闭，`minor_guard`
+  恒放行；支付前免责勾选的服务端校验 `ENFORCE_PAYMENT_DISCLAIMER` 默认关闭、
+  佣金提现代扣个税 `WITHDRAW_TAX_ENABLED` 默认关闭。生产启动日志会以 ERROR 级
+  反复提示这三项，上线前需由运营逐项确认。
 
 ## 部署方责任
 

@@ -27,12 +27,11 @@ _INTERNAL_KEYS: set = set()
 # 站点多处入口的可用性取决于运行期是否接了外部通道，此前前端一律照常展示：
 #   · 注册页摆「验证码 *」+「发送验证码」，但邮件未接入 —— 点一下就把该邮箱的
 #     注册通道堵死 10 分钟（验证码落了 Redis 却永远收不到）；
-#   · 充值区摆 ¥50/¥100/¥200/¥500/¥1000 五档 + 确认充值，但商户凭据未配 ——
-#     填完点下去才被告知「暂未开通」。
+#   · 支付入口照常展示，但商户凭据未配 —— 填完点下去才被告知「暂未开通」。
 # 统一由此接口下发两个布尔位，前端按位收起入口并给准确文案；系统配置表写入
 # 同名键可人工覆盖（例如灰度关闭某项）。
 # 两个探测都在函数内延迟导入并兜底 False：任一侧导入失败只等于「该能力不可用」，
-# 绝不能把公开配置接口打成 500（首页/注册页/开发者中心都依赖它）。
+# 绝不能把公开配置接口打成 500（首页/注册页都依赖它）。
 
 
 def _email_verify_enabled() -> bool:
@@ -79,7 +78,9 @@ async def get_public_config(db: AsyncSession = Depends(get_db)):
     public.setdefault("paid_reports_enabled", True)
     public.setdefault("refund_enabled", True)
     public.setdefault("distribution_enabled", True)
-    public.setdefault("theme", {"primary_color": "#8B4513", "accent_color": "#D2691E", "danger_color": "#e64340"})
+    # 与 sql/init.sql 的 theme 种子保持同一套配色：两处不一致会让「空库启动」
+    # 与「按 init.sql 初始化」呈现不同主题，排障时很容易误判成前端缓存问题。
+    public.setdefault("theme", {"primary_color": "#3B82F6", "accent_color": "#2563EB", "danger_color": "#e64340"})
     # announcement / vip_benefits 虽在 _PUBLIC_KEYS 白名单内，但 system_configs 表里
     # 一直没有这两行，实测 /system/config 从不返回它们：首页公告永远不弹，会员权益文案
     # 只能吃前端硬编码的 fallbackVipBenefits（改文案要发版）。补上与前端一致的默认值，

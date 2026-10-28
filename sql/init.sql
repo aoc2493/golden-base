@@ -14,6 +14,8 @@ CREATE TABLE IF NOT EXISTS `users` (
   `oa_openid`           VARCHAR(64)  DEFAULT NULL COMMENT '服务号网页授权openid',
   `mp_openid`           VARCHAR(64)  DEFAULT NULL COMMENT '小程序openid',
   `unionid`             VARCHAR(64)  DEFAULT NULL,
+  `email`               VARCHAR(255) DEFAULT NULL COMMENT '邮箱（Web 站注册登录）',
+  `password_hash`       VARCHAR(255) DEFAULT NULL COMMENT '密码摘要 pbkdf2_sha256$迭代$盐$摘要',
   `phone`               VARCHAR(20)  DEFAULT NULL,
   `nickname`            VARCHAR(50)  DEFAULT NULL,
   `avatar_url`          VARCHAR(500) DEFAULT NULL,
@@ -28,7 +30,8 @@ CREATE TABLE IF NOT EXISTS `users` (
   UNIQUE KEY `uk_device_code` (`device_code`),
   UNIQUE KEY `uk_oa_openid` (`oa_openid`),
   UNIQUE KEY `uk_mp_openid` (`mp_openid`),
-  UNIQUE KEY `uk_unionid` (`unionid`)
+  UNIQUE KEY `uk_unionid` (`unionid`),
+  UNIQUE KEY `uk_users_email` (`email`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='用户表（JWT无状态，不存token）';
 
 -- ===== 身份台账表（登录标识 ↔ user_id 双向唯一映射）=====
@@ -114,7 +117,11 @@ CREATE TABLE IF NOT EXISTS `orders` (
   `created_at`     DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at`     DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   UNIQUE KEY `uk_order_no` (`order_no`),
-  INDEX `ix_orders_sku_code` (`sku_code`)
+  INDEX `ix_orders_sku_code` (`sku_code`),
+  -- 用户「我的订单」与后台列表按 user_id 过滤；关单/查单/对账任务按 (status, created_at) 扫描。
+  -- 缺这两条索引时两类查询都是全表扫描，而 orders 是增长最快的一张表。
+  INDEX `ix_orders_user_id` (`user_id`),
+  INDEX `ix_orders_status_created` (`status`, `created_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='订单表';
 
 -- ===== 会员身份表 =====
@@ -516,7 +523,8 @@ CREATE TABLE IF NOT EXISTS `report_tickets` (
   `responded_at`         DATETIME DEFAULT NULL,
   `created_at`           DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at`           DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  INDEX `ix_report_tickets_reporter_id` (`reporter_id`)
+  INDEX `ix_report_tickets_reporter_id` (`reporter_id`),
+  INDEX `ix_report_tickets_target_distributor_id` (`target_distributor_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='举报工单';
 
 -- ===== 违规分级处置记录 =====
@@ -537,7 +545,8 @@ CREATE TABLE IF NOT EXISTS `violation_records` (
   `handler`          VARCHAR(50) DEFAULT NULL,
   `status`           VARCHAR(20) DEFAULT 'applied' COMMENT 'applied已处置/revoked已撤销',
   `created_at`       DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  INDEX `ix_violation_records_distributor_id` (`distributor_id`)
+  INDEX `ix_violation_records_distributor_id` (`distributor_id`),
+  INDEX `ix_violation_records_user_id` (`user_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='违规处置记录（留痕≥3年）';
 
 -- ===== 管理操作审计日志 =====
@@ -639,11 +648,12 @@ ON DUPLICATE KEY UPDATE `config_value` = VALUES(`config_value`);
 -- ============================================
 -- 初始化会员档位商品（通用三档；具体能力商品由业务插件的 manifest 声明后写入）
 -- 定价与 config.MEMBERSHIP_* 及 main._seed_base_data 保持一致。
+-- 仅在数据卷为空时执行一次；重复执行不得覆盖运营改过的名称/描述/价格/上下架状态，
+-- 故冲突分支只做空操作（sku_code 自赋值）。已有库要补列 / 补索引，走 sql/migrations/。
 -- ============================================
 INSERT INTO `products` (`sku_code`, `product_type`, `feature`, `name`, `description`, `price`, `refund_rule`, `sort_order`, `enabled`) VALUES
   ('vip_month',    'membership', 'vip', '月卡会员',   '开通起30天：会员权益、周期总额度100次、单能力单日10次',                                             99.00,  '虚拟内容服务，支付后7天内未使用可联系客服退款', 1, 1),
   ('vip_year',     'membership', 'vip', '年卡会员',   '开通起365天：会员权益、周期总额度1200次、单能力单日50次、优先客服',                                299.00, '虚拟内容服务，支付后7天内未使用可联系客服退款', 2, 1),
   ('vip_lifetime', 'membership', 'vip', '终身会员',   '平台运营期内永久：会员权益、每365天周期总额度3000次、单能力单日100次、最高优先客服',               599.00, '虚拟内容服务，支付后7天内未使用可联系客服退款', 3, 1)
 ON DUPLICATE KEY UPDATE
-  `name`=VALUES(`name`), `description`=VALUES(`description`), `price`=VALUES(`price`),
-  `product_type`=VALUES(`product_type`), `feature`=VALUES(`feature`);
+  `sku_code` = `sku_code`;
