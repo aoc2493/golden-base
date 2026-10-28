@@ -498,7 +498,7 @@ async def _check_membership_products(db=None) -> None:
 app = FastAPI(
     title="通用应用后端 API",
     description="会员、单次/按天权益、微信/支付宝支付、一级直推分销与提现审核",
-    version="7.0.0",
+    version="7.0.1",
     lifespan=lifespan,
     # 安全加固：生产关闭 docs/redoc/openapi，避免匿名公网获取完整 API 地图
     #（含管理端端点与请求/响应结构，等于给攻击者递地图）；非生产保留便于调试。
