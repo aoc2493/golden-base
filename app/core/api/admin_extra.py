@@ -19,7 +19,7 @@ from decimal import Decimal
 from types import SimpleNamespace
 
 from fastapi import APIRouter, Body, Depends, Query, Request
-from sqlalchemy import select, func
+from sqlalchemy import select, func, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -31,8 +31,9 @@ from app.core.models import (
     AdminOperationLog, ComplianceConsent, Feedback, SystemConfig,
     AiGenerationLog, AttributionTouch, MembershipLedger, VerifiedPaidUser,
     ExamRecord, ViolationRecord, MonthlyPerformance, UserEntitlement,
-    Report, CommissionFailLog,
+    Report, CommissionFailLog, PasswordResetTicket, User,
 )
+from app.core.schemas import AdminPasswordResetRequest
 
 # router 级限流（与 admin.py 同口径，见其 _admin_router_rate_limit 注释）
 router = APIRouter(prefix="/admin", tags=["管理端-全量数据"],
@@ -408,3 +409,59 @@ async def admin_user_extra(user_id: int,
                              for t in ents]}
     data.update(await registry.admin_user_extra_data(user_id, db))
     return success(data)
+
+
+@router.get("/password-reset-tickets")
+async def admin_password_reset_tickets(
+        page: int = Query(1, ge=1),
+        page_size: int = Query(20, ge=1, le=100),
+        status_filter: str = Query("pending", alias="status"),
+        db: AsyncSession = Depends(get_db),
+        is_admin: bool = Depends(require_admin)):
+    err = _deny(is_admin)
+    if err:
+        return err
+    filters = [PasswordResetTicket.status == status_filter] if status_filter else None
+    return success(await _paged(
+        db, PasswordResetTicket,
+        ["id", "user_id", "email", "status", "delivered",
+         "expires_at", "used_at", "created_at"],
+        page, page_size, filters,
+    ))
+
+
+@router.post("/users/{user_id}/password-reset")
+async def admin_password_reset(
+        user_id: int,
+        req: AdminPasswordResetRequest,
+        request: Request,
+        db: AsyncSession = Depends(get_db),
+        is_admin: bool = Depends(require_admin)):
+    """Manual reset for deployments without SMTP; password is never returned."""
+    err = _deny(is_admin)
+    if err:
+        return err
+    pw_err = await _check_operate_password(req, db)
+    if pw_err:
+        return error(ErrorCode.NO_PERMISSION, pw_err)
+    user = (await db.execute(select(User).where(
+        User.id == user_id, User.status == 1))).scalar_one_or_none()
+    if not user:
+        return error(ErrorCode.PARAM_ERROR, "用户不存在或已注销")
+    user.password_hash = await credential_svc.hash_user_password(req.new_password)
+    user.auth_version = int(user.auth_version or 0) + 1
+    await db.execute(
+        update(PasswordResetTicket)
+        .where(PasswordResetTicket.user_id == user_id,
+               PasswordResetTicket.status == "pending")
+        .values(status="manual", used_at=datetime.now())
+    )
+    db.add(AdminOperationLog(
+        action="manual_password_reset",
+        target_type="user",
+        target_id=str(user_id),
+        detail="{}",
+        ip=get_client_ip(request),
+    ))
+    await db.commit()
+    return success(msg="密码已重置")

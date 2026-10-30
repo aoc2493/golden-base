@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update, func
+from sqlalchemy.exc import IntegrityError
 from app.core.database import get_db
 from app.core.models import User, Order, Product, ResultCache, Report, Refund
 from app.core.schemas import OrderCreateRequest, RefundRequest
@@ -41,6 +42,19 @@ def _norm_biz(val) -> dict:
         except json.JSONDecodeError:
             return {}
     return val if isinstance(val, dict) else {}
+
+
+def _same_order_snapshot(existing: Order, *, product_id: int, channel: str, amount,
+                         cache_id_val, biz_data: dict, input_snapshot) -> bool:
+    """One definition for reuse checks on both the normal and race-recovery paths."""
+    return (
+        existing.product_id == product_id
+        and existing.pay_channel == channel
+        and to_money(existing.amount) == amount
+        and (existing.result_ref_id or None) == cache_id_val
+        and _norm_biz(existing.biz_data) == _norm_biz(biz_data)
+        and _norm_biz(existing.input_snapshot) == _norm_biz(input_snapshot)
+    )
 
 
 def _gate_subjects(input_snapshot, biz_data: dict) -> list:
@@ -171,6 +185,8 @@ async def create_order(req: OrderCreateRequest, request: Request,
             select(Product).where(Product.id == req.product_id, Product.enabled == 1))).scalar_one_or_none()
     if not product:
         return error(ErrorCode.PRODUCT_NOT_FOUND, "商品不存在或已下架")
+    if not product.sku_code:
+        return error(ErrorCode.PARAM_ERROR, "商品编码异常，请联系客服")
     if (product.product_type or "") == "timepass":
         return error(ErrorCode.PARAM_ERROR, "该商品为卡券专享，请通过卡券兑换使用")
     sku = product.sku_code
@@ -246,33 +262,55 @@ async def create_order(req: OrderCreateRequest, request: Request,
         # 直接改写 pay_channel，旧渠道侧（微信 prepay/支付宝待支付单）仍挂在平台上，
         # 用户两个渠道都能完成支付，第二笔回调撞上已完成订单即成双收款且无法自助退款。
         # 渠道变更视为快照不一致：作废旧单、按新渠道新建。
-        same_snapshot = (
-            existing.product_id == product.id
-            and existing.pay_channel == channel
-            and to_money(existing.amount) == amount
-            and (existing.result_ref_id or None) == cache_id_val
-            and _norm_biz(existing.biz_data) == _norm_biz(biz_data)
-            and _norm_biz(existing.input_snapshot) == _norm_biz(input_snapshot)
-        )
+        same_snapshot = _same_order_snapshot(
+            existing, product_id=product.id, channel=channel, amount=amount,
+            cache_id_val=cache_id_val, biz_data=biz_data,
+            input_snapshot=input_snapshot)
         if same_snapshot:
             order = existing
+            if order.active_key != "active":
+                order.active_key = "active"
+                await db.flush()
         else:
             existing.status = "cancelled"
+            existing.active_key = None
             existing.fail_reason = (f"业务快照或支付渠道已变更（{existing.pay_channel}→{channel}），"
                                     f"重新下单")
+            await db.flush()
             logger.info(f"未支付订单快照不一致，作废旧单 order_no={existing.order_no} sku={sku}")
     if order is None:
         order = Order(
             order_no=PaymentService.generate_order_no(), user_id=user.id, product_id=product.id,
             sku_code=sku, product_type=ptype, product_name=product.name, amount=amount,
-            status="pending", pay_channel=channel,
+            status="pending", active_key="active", pay_channel=channel,
             result_ref_id=cache_id_val,
             input_snapshot=input_snapshot, biz_data=biz_data if biz_data else None,
             inviter_id=user.inviter_id,
             # 双向定位快照：user_id + 下单时登录标识共同钉死买家，开票/退款/客服追踪可双向回溯
             login_id_type=user.last_login_type, login_id_value=user.last_login_value)
-        db.add(order)
-        await db.flush()
+        try:
+            async with db.begin_nested():
+                db.add(order)
+                await db.flush()
+        except IntegrityError:
+            # A concurrent request won the unique active-intent key. Re-read
+            # the winner as a locking read so both requests converge on one
+            # order instead of creating two payment intents.
+            winner = (await db.execute(
+                select(Order).where(
+                    Order.user_id == user.id,
+                    Order.sku_code == sku,
+                    Order.status == "pending",
+                    Order.active_key == "active",
+                ).order_by(Order.id.desc()).with_for_update()
+            )).scalars().first()
+            if winner and _same_order_snapshot(
+                    winner, product_id=product.id, channel=channel, amount=amount,
+                    cache_id_val=cache_id_val, biz_data=biz_data,
+                    input_snapshot=input_snapshot):
+                order = winner
+            else:
+                return error(ErrorCode.RATE_LIMIT, "下单请求正在处理中，请稍后刷新订单")
 
     # 取用户真实公网 IP
     client_ip = get_client_ip(request)
@@ -467,7 +505,7 @@ async def cancel_order(order_id: int, db: AsyncSession = Depends(get_db),
     if order.status != "pending":
         return error(ErrorCode.ORDER_INVALID, "当前订单状态不可取消")
     await db.execute(update(Order).where(Order.id == order_id, Order.status == "pending")
-                     .values(status="cancelled"))
+                     .values(status="cancelled", active_key=None))
     return success()
 
 
@@ -494,6 +532,7 @@ async def continue_pay(order_id: int, request: Request, db: AsyncSession = Depen
     timeout = datetime.now() - timedelta(minutes=settings.ORDER_TIMEOUT_MINUTES)
     if order.created_at < timeout:
         order.status = "expired"
+        order.active_key = None
         await db.flush()
         return error(ErrorCode.ORDER_INVALID, "订单已超时，请重新下单")
     ua = (request.headers.get("user-agent") or "").lower()
@@ -555,7 +594,7 @@ async def apply_refund_api(req: RefundRequest, request: Request,
     # 用带状态条件的原子 UPDATE 抢占订单，affected==0 即说明已被其他请求抢占。
     claimed = (await db.execute(
         update(Order).where(Order.id == order.id, Order.status == "completed")
-        .values(status="refund_pending"))).rowcount
+        .values(status="refund_pending", active_key=None))).rowcount
     if not claimed:
         return error(ErrorCode.REFUND_NOT_ELIGIBLE, "该订单已在退款流程中，请勿重复申请")
 
@@ -586,6 +625,7 @@ async def apply_refund_api(req: RefundRequest, request: Request,
     if result.ok:
         refund.status = "refunded"
         order.status = "refunded"
+        order.active_key = None
         # 回收失败要能感知，不再静默（revoke 内部记录失败日志并返回问题）
         revoke_warn = await revoke_refunded_order(db, order)
         if revoke_warn:
@@ -593,6 +633,7 @@ async def apply_refund_api(req: RefundRequest, request: Request,
     elif result.status == "processing":
         # 退款处理中，订单已由上方抢占置为 refund_pending，等退款回调更新
         refund.status = "processing"
+        order.active_key = None
         return success({"status": "processing", "msg": "退款处理中，请留意支付平台通知"})
     else:
         refund.status = "failed"
@@ -607,7 +648,7 @@ async def apply_refund_api(req: RefundRequest, request: Request,
         restored = (await db.execute(
             update(Order)
             .where(Order.id == order.id, Order.status == "refund_pending")
-            .values(status="completed"))).rowcount
+            .values(status="completed", active_key=None))).rowcount
         if not restored:
             logger.error(f"退款失败还原未生效：订单已不在 refund_pending，放弃还原 "
                          f"order={order.order_no} current={order.status}")

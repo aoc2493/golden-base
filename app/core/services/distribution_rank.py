@@ -162,9 +162,12 @@ async def settle_month(db: AsyncSession, month: str) -> dict:
     两份；这里用 `row_lock`（MySQL SELECT ... FOR UPDATE）把当月月度记录全部锁住，并发结算
     在数据库层串行化；UPDATE 再带 `settled == 0` 的 CAS 条件兜底，只有真正把 0->1 的那一轮
     才允许入账（阶梯差额补发 + 排行榜奖金），避免重复发钱。"""
-    rank_map = await compute_ranking(db, month)
     perfs = (await db.execute(row_lock(select(MonthlyPerformance).where(
         MonthlyPerformance.month == month, MonthlyPerformance.settled == 0)))).scalars().all()
+    # Ranking must be computed from the same locked snapshot as the money
+    # movements. Computing it before the lock lets a concurrent refund change
+    # the totals between rank calculation and settlement.
+    rank_map = await compute_ranking(db, month)
     now = datetime.now()
     count = 0
     sum_ladder = Decimal("0.00")
@@ -199,9 +202,9 @@ async def settle_month(db: AsyncSession, month: str) -> dict:
 async def clawback_distributor_month(db: AsyncSession, dist_id: int, month: str) -> Decimal:
     """第三十四条第5款：结算后订单退款导致不再达档位/名次门槛，按最终业绩重核追回多发部分。
     仅重核本推广员（不重新排名他人）；返回本次追回净额（<=0 表示扣回，0 表示无变化）。"""
-    mp = (await db.execute(select(MonthlyPerformance).where(
+    mp = (await db.execute(row_lock(select(MonthlyPerformance).where(
         MonthlyPerformance.distributor_id == dist_id,
-        MonthlyPerformance.month == month))).scalar_one_or_none()
+        MonthlyPerformance.month == month)))).scalar_one_or_none()
     if not mp or mp.settled != 1:
         return Decimal("0.00")             # 未结算月份：退款只减总额，结算时自然按最终档位计
     total = _money(mp.total_amount)
@@ -231,9 +234,9 @@ async def disqualify_month(db: AsyncSession, dist_id: int, month: str) -> Decima
     - 未结算月：仅标记 disqualified=1，次月8号结算时自然不计阶梯/排行；
     - 已结算月：把阶梯上浮清零重算（追回差额）+ 扣回排行奖金。
     已追回的奖励不补发（第六十条末：中度及以上被取消的当月奖励解冻后不补发）。"""
-    mp = (await db.execute(select(MonthlyPerformance).where(
+    mp = (await db.execute(row_lock(select(MonthlyPerformance).where(
         MonthlyPerformance.distributor_id == dist_id,
-        MonthlyPerformance.month == month))).scalar_one_or_none()
+        MonthlyPerformance.month == month)))).scalar_one_or_none()
     if mp is None:
         return Decimal("0.00")
     await db.execute(update(MonthlyPerformance).where(MonthlyPerformance.id == mp.id)

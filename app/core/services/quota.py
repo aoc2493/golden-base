@@ -242,7 +242,7 @@ async def charge_member_view(db: AsyncSession, user: User, sku_view: str, biz_ke
         order = Order(
             order_no=PaymentService.generate_order_no(), user_id=user.id, product_id=None,
             sku_code=sku_view, product_type="single", product_name=name,
-            amount=0, status="completed", pay_channel="member",
+            amount=0, status="completed", active_key=None, pay_channel="member",
             paid_at=datetime.now(), fulfilled_at=datetime.now(),
             biz_data=biz_data, inviter_id=user.inviter_id)
         db.add(order)
@@ -250,6 +250,7 @@ async def charge_member_view(db: AsyncSession, user: User, sku_view: str, biz_ke
         ok, reason = await consume(db, user.id, sku_view, order.id)
         if not ok:
             order.status = "cancelled"
+            order.active_key = None
             order.fail_reason = ("会员单工具当日次数已用尽" if reason == "daily"
                                  else "会员周期总额度已用尽")
             await db.flush()
@@ -281,5 +282,6 @@ async def cancel_member_view(db: AsyncSession, order_id: Optional[int]) -> None:
         update(Order).where(
             Order.id == order_id, Order.pay_channel == "member",
             Order.status == "completed")
-        .values(status="cancelled", fail_reason="计费接口调用失败，未占用额度")
+        .values(status="cancelled", active_key=None,
+                fail_reason="计费接口调用失败，未占用额度")
         .execution_options(synchronize_session=False))

@@ -54,9 +54,15 @@ REFUND_STATUS_MAP = {'SUCCESS': 'success', 'PROCESSING': 'processing',
 class PaymentService:
     @staticmethod
     def generate_order_no() -> str:
-        """BZ + 年月日时分秒 + 6 位密码学随机数，降低同秒碰撞概率"""
+        """BZ + time + 48-bit cryptographic suffix.
+
+        Six decimal digits only provide 900k choices per second and become a
+        realistic unique-constraint failure at high traffic. Twelve hex chars
+        keep the identifier readable while making collisions operationally
+        negligible.
+        """
         timestamp = time.strftime("%Y%m%d%H%M%S")
-        rand = str(secrets.randbelow(900000) + 100000)  # 6 位
+        rand = secrets.token_hex(6).upper()
         return f"BZ{timestamp}{rand}"
 
 

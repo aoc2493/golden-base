@@ -35,6 +35,8 @@ class User(Base):
     unionid = Column(String(64), unique=True, nullable=True)
     email = Column(String(255), unique=True, nullable=True, comment="邮箱（Web 站注册登录）")
     password_hash = Column(String(255), nullable=True, comment="密码摘要，格式 pbkdf2_sha256$迭代$盐$摘要")
+    auth_version = Column(Integer, default=0, nullable=False,
+                          comment="认证版本；改密/重置后递增以撤销全部旧会话")
     phone = Column(String(20), nullable=True)
     nickname = Column(String(50), nullable=True)
     avatar_url = Column(String(500), nullable=True)
@@ -147,6 +149,10 @@ class Order(Base):
         # 最左前缀仍是 user_id，所以只按 user_id 过滤的查询照用，无需再留单列索引。
         Index("ix_orders_user_created", "user_id", "created_at"),
         Index("ix_orders_status_created", "status", "created_at"),
+        # 活跃意图键只在 pending 时非空。MySQL 唯一索引允许多个 NULL，
+        # 因此既能保证同一用户/商品最多一张 pending 单，又不会阻止历史上已完成的多笔购买。
+        UniqueConstraint("user_id", "sku_code", "active_key",
+                         name="uk_order_active_intent"),
     )
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     order_no = Column(String(32), unique=True, nullable=False)
@@ -159,6 +165,10 @@ class Order(Base):
     # refund_pending：退款处理中、允许重试——只有退款三态齐备才能重试，不再卡死
     status = Column(String(20), default="pending",
                     comment="pending/completed/refunded/refund_pending/expired/cancelled")
+    active_key = Column(
+        String(20), nullable=True,
+        comment="pending 时为 active，进入终态后置 NULL；用于并发下单唯一约束",
+    )
     pay_channel = Column(String(10), nullable=True)
     result_ref_id = Column(BigInteger, nullable=True)
     input_snapshot = Column(JSON, nullable=True)
@@ -350,6 +360,32 @@ class SystemConfig(Base):
     config_value = Column(JSON, nullable=False)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now,
                         server_default=func.now())
+
+
+class PasswordResetTicket(Base):
+    """Durable password-reset request and one-time code state.
+
+    The public request endpoint must always return the same response so it
+    cannot enumerate accounts.  Only an existing active account gets a row;
+    codes are stored as keyed SHA-256 digests, never in plaintext.
+    """
+    __tablename__ = "password_reset_tickets"
+    __table_args__ = (
+        Index("ix_password_reset_email_status", "email", "status"),
+        Index("ix_password_reset_user_status", "user_id", "status"),
+        Index("ix_password_reset_expires_at", "expires_at"),
+    )
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    user_id = Column(BigInteger, nullable=False)
+    email = Column(String(255), nullable=False)
+    code_hash = Column(String(64), nullable=False)
+    status = Column(String(20), default="pending",
+                    comment="pending/used/expired/manual")
+    delivered = Column(SmallInteger, default=0, nullable=False)
+    expires_at = Column(DateTime, nullable=False)
+    used_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.now, server_default=func.now())
 
 
 # ==================== 一级直推分销 ====================

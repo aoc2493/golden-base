@@ -485,7 +485,10 @@ async def admin_refund(order_id: int, req: AdminRefundRequest, request: Request,
     prev_status = order.status
     # 第一层护栏：Redis 互斥锁，与计算 / ensure-report / 实时测算发起测算同一套路，覆盖上面两种入口状态。
     lock_key = f"lock:admin_refund:{order_id}"
-    lock_token = await redis_acquire_lock(redis_client, lock_key, 60)
+    # The completed->refund_pending CAS below is the authoritative guard, so a
+    # Redis outage may safely degrade to the database-backed path.
+    lock_token = await redis_acquire_lock(
+        redis_client, lock_key, 60, fail_closed=False)
     if not lock_token:
         return error(ErrorCode.RATE_LIMIT, "该订单退款正在处理，请稍候再试")
     try:
@@ -498,7 +501,7 @@ async def admin_refund(order_id: int, req: AdminRefundRequest, request: Request,
         if prev_status == "completed":
             claimed = (await db.execute(
                 update(Order).where(Order.id == order.id, Order.status == "completed")
-                .values(status="refund_pending"))).rowcount
+                .values(status="refund_pending", active_key=None))).rowcount
             if not claimed:
                 return error(ErrorCode.REFUND_NOT_ELIGIBLE, "该订单已在退款流程中，请勿重复操作")
         # 退款单号入库即预生成并原样传给平台。此前 apply_refund 内部临时生成——
@@ -522,6 +525,7 @@ async def admin_refund(order_id: int, req: AdminRefundRequest, request: Request,
         if result.ok:
             refund.status = "refunded"
             order.status = "refunded"
+            order.active_key = None
             warn = await revoke_refunded_order(db, order)
             await _log_operation(db, request, "admin_refund", "order", order_id,
                                  {"order_no": order.order_no, "amount": float(order.amount),
@@ -531,6 +535,7 @@ async def admin_refund(order_id: int, req: AdminRefundRequest, request: Request,
         elif result.status == "processing":
             refund.status = "processing"
             order.status = "refund_pending"
+            order.active_key = None
             await _log_operation(db, request, "admin_refund_processing", "order", order_id,
                                  {"order_no": order.order_no})
             return success(msg="退款处理中，以支付平台最终结果为准")

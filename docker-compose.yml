@@ -95,8 +95,9 @@ services:
       # 与后端 PROXY_AUTH_SECRET 填同一个值，注入 X-Proxy-Auth 头，
       # 后端据此判定 X-Real-IP / X-Forwarded-For 可信（留空则跳过该校验）
       PROXY_AUTH_SECRET: ${PROXY_AUTH_SECRET:-}
+      EDGE_PROXY_AUTH_SECRET: ${EDGE_PROXY_AUTH_SECRET:?请在 .env 中配置 EDGE_PROXY_AUTH_SECRET}
       # 只替换这一个变量，nginx 内置变量（$host/$remote_addr/$scheme）原样保留
-      NGINX_ENVSUBST_FILTER: PROXY_AUTH_SECRET
+      NGINX_ENVSUBST_FILTER: PROXY_AUTH_SECRET|EDGE_PROXY_AUTH_SECRET
     volumes:
       - ./web:/usr/share/nginx/html:ro
       # 挂成 templates/*.template，容器启动时 envsubst 渲染后写入 conf.d/default.conf

@@ -133,6 +133,13 @@ class PasswordResetRequest(BaseModel):
     email: str = Field(..., max_length=255, description="注册邮箱")
 
 
+class PasswordResetConfirmRequest(BaseModel):
+    """Use a one-time email verification code to set a new password."""
+    email: str = Field(..., max_length=255)
+    code: str = Field(..., min_length=6, max_length=12)
+    new_password: str = Field(..., min_length=8, max_length=128)
+
+
 class WechatLoginRequest(BaseModel):
     code: str = Field(..., max_length=128)
     invite_code: Optional[str] = Field(None, max_length=12)
@@ -257,6 +264,11 @@ class AdminMembershipRequest(BaseModel):
     days: Optional[int] = Field(None, ge=1, le=3650)
     remark: Optional[str] = Field(None, max_length=200)
     operate_password: Optional[str] = Field(None, max_length=64, description="敏感操作二次密码")
+
+
+class AdminPasswordResetRequest(BaseModel):
+    new_password: str = Field(..., min_length=8, max_length=128)
+    operate_password: Optional[str] = Field(None, max_length=64)
 
 
 # ===== 分销 V1.3：用户端合规钩子 =====

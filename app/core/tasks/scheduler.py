@@ -21,7 +21,10 @@ from datetime import datetime, timedelta
 from sqlalchemy import select, update, delete
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from app.core.database import AsyncSessionLocal
-from app.core.models import ResultCache, Order, Report, Refund, CommissionFailLog, AiGenerationLog
+from app.core.models import (
+    ResultCache, Order, Report, Refund, CommissionFailLog, AiGenerationLog,
+    PasswordResetTicket,
+)
 from app.core.utils.payment import apply_refund, gen_refund_no, has_real_payment, no_payment_reason, query_refund
 from app.core.services.distribution import settle_due_commissions, on_order_paid, promote_verified_users, apply_pending_promotions
 from app.core.services.distribution_rank import settle_month, last_month_key
@@ -73,6 +76,25 @@ async def clean_expired_cache():
             await db.rollback()
 
 
+async def clean_expired_password_reset_tickets():
+    """Remove expired/consumed reset records after a 30-day audit window."""
+    if not await _acquire_lock("clean_password_reset", 300):
+        return
+    cutoff = datetime.now() - timedelta(days=30)
+    async with AsyncSessionLocal() as db:
+        try:
+            result = await db.execute(delete(PasswordResetTicket).where(
+                PasswordResetTicket.created_at < cutoff,
+                PasswordResetTicket.status != "pending",
+            ))
+            await db.commit()
+            if result.rowcount:
+                logger.info("清理密码重置记录: %s 条", result.rowcount)
+        except Exception as e:
+            logger.error("清理密码重置记录失败: %s", e)
+            await db.rollback()
+
+
 async def close_expired_orders():
     if not await _acquire_lock("close_orders", 300):
         return
@@ -80,7 +102,8 @@ async def close_expired_orders():
         try:
             timeout = datetime.now() - timedelta(minutes=settings.ORDER_TIMEOUT_MINUTES)
             result = await db.execute(update(Order).where(
-                Order.status == "pending", Order.created_at < timeout).values(status="expired"))
+                Order.status == "pending", Order.created_at < timeout
+            ).values(status="expired", active_key=None))
             await db.commit()
             if result.rowcount > 0:
                 logger.info(f"关闭超时订单: {result.rowcount} 个")
@@ -138,7 +161,7 @@ async def auto_refund_failed_reports():
                 # 与 api/order.py 用户端退款同一护栏。
                 claimed = (await db.execute(
                     update(Order).where(Order.id == order.id, Order.status == "completed")
-                    .values(status="refund_pending"))).rowcount
+                    .values(status="refund_pending", active_key=None))).rowcount
                 if not claimed:
                     report.retry_count = 99
                     logger.info(f"报告 {report.id} 自动退款跳过：订单 {order.order_no} 已被其他路径抢占")
@@ -149,6 +172,10 @@ async def auto_refund_failed_reports():
                                 refund_no=refund_no)
                 db.add(refund)
                 await db.flush()
+                # External money movement must never share the database
+                # transaction that first records the idempotency key. Commit
+                # the order claim and refund number before calling the channel.
+                await db.commit()
                 # 退款单号在入库时即预生成并原样传给平台。此前调用 apply_refund 时不传
                 # refund_no，由平台内部临时生成——若进程在拿到结果前崩溃，Refund 行上就是空单号，
                 # 后续 retry_failed_refunds 重试时会再生成一个新单号，向支付平台发起第二笔真实退款。
@@ -163,20 +190,23 @@ async def auto_refund_failed_reports():
                 if result.ok:
                     refund.status = "refunded"
                     order.status = "refunded"
+                    order.active_key = None
                     report.status = "refunded"
                     await revoke_refunded_order(db, order)
                 elif result.status == "processing":
                     refund.status = "processing"
                     order.status = "refund_pending"
+                    order.active_key = None
                 else:
                     refund.status = "failed"
                     refund.fail_reason = (result.msg or "自动退款调用失败")[:200]
                     # 平台未受理：还原抢占时置的 refund_pending，交给 retry_failed_refunds 继续推进。
                     # 同样必须用 Core UPDATE，ORM 赋值不会生成 UPDATE（内存值仍是 completed）。
                     await db.execute(update(Order).where(
-                        Order.id == order.id, Order.status == "refund_pending").values(status="completed"))
+                        Order.id == order.id, Order.status == "refund_pending"
+                    ).values(status="completed", active_key=None))
                 report.retry_count = 99
-            await db.commit()
+                await db.commit()
             if reports:
                 logger.info(f"失败报告自动退款处理: {len(reports)} 个")
         except Exception as e:
@@ -190,8 +220,15 @@ async def retry_failed_refunds():
         return
     async with AsyncSessionLocal() as db:
         try:
+            stale_pending = datetime.now() - timedelta(minutes=5)
             refunds = (await db.execute(
-                select(Refund).where(Refund.status == "failed", Refund.retry_count < 3))).scalars().all()
+                select(Refund).where(
+                    Refund.retry_count < 3,
+                    ((Refund.status == "failed") |
+                     ((Refund.status == "pending_refund") &
+                      (Refund.updated_at < stale_pending))),
+                )
+            )).scalars().all()
             exhausted = (await db.execute(
                 select(Refund).where(Refund.status == "failed", Refund.retry_count >= 3))).scalars().all()
             # 重试耗尽的退款单告警（每次运行只告警一次/条，日志可被监控采集）
@@ -243,7 +280,7 @@ async def retry_failed_refunds():
                 if order.status == "completed":
                     claimed = (await db.execute(
                         update(Order).where(Order.id == order.id, Order.status == "completed")
-                        .values(status="refund_pending"))).rowcount
+                        .values(status="refund_pending", active_key=None))).rowcount
                     if not claimed:
                         logger.info(f"退款单 {refund.id} 跳过重试：订单 {order.order_no} 已被其他路径抢占")
                         continue
@@ -256,18 +293,22 @@ async def retry_failed_refunds():
                     refund.status = "refunded"
                     refund.fail_reason = None
                     order.status = "refunded"
+                    order.active_key = None
                     await revoke_refunded_order(db, order)
                 elif result.status == "processing":
                     refund.status = "processing"
                     order.status = "refund_pending"
+                    order.active_key = None
                 else:
+                    refund.status = "failed"
                     refund.fail_reason = f"第{refund.retry_count}次重试失败: {result.msg or ''}"[:200]
                     # 平台仍未受理：把上面抢占时置的 refund_pending 还原为 completed，
                     # 否则订单永久卡在“退款中”，用户看不到已完成订单、下一轮重试也会被状态判断跳过。
                     # 必须用 Core UPDATE：ORM 实例内存里的 status 仍是抢占前的 completed，
                     # 赋相同值不会生成 UPDATE（与 api/order.py 用户端退款同一处理）。
                     await db.execute(update(Order).where(
-                        Order.id == order.id, Order.status == "refund_pending").values(status="completed"))
+                        Order.id == order.id, Order.status == "refund_pending"
+                    ).values(status="completed", active_key=None))
             await db.commit()
             if refunds:
                 logger.info(f"退款失败重试: {len(refunds)} 个")
@@ -554,6 +595,8 @@ async def alert_heartbeat():
 
 def start_scheduler():
     scheduler.add_job(clean_expired_cache, "cron", hour=3, minute=0, id="clean_cache", replace_existing=True)
+    scheduler.add_job(clean_expired_password_reset_tickets, "cron", hour=3, minute=10,
+                      id="clean_password_reset", replace_existing=True)
     scheduler.add_job(close_expired_orders, "interval", minutes=5, id="close_orders", replace_existing=True)
     scheduler.add_job(auto_refund_failed_reports, "interval", minutes=10, id="auto_refund", replace_existing=True)
     scheduler.add_job(retry_failed_refunds, "interval", minutes=30, id="retry_refund", replace_existing=True)

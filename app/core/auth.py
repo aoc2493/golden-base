@@ -46,7 +46,8 @@ except Exception as _e:
     redis_client = None
 
 
-def create_jwt_token(user_id: int, expire_days: int = None) -> Tuple[str, str]:
+def create_jwt_token(user_id: int, expire_days: int = None,
+                     auth_version: int = 0) -> Tuple[str, str]:
     """创建 JWT token，返回 (token, jti)。jti 用于黑名单定位。"""
     expire_days = expire_days or settings.JWT_EXPIRE_DAYS
     now = datetime.now(timezone.utc)
@@ -59,6 +60,7 @@ def create_jwt_token(user_id: int, expire_days: int = None) -> Tuple[str, str]:
         "type": "access",
         "aud": settings.JWT_AUDIENCE,
         "iss": settings.JWT_ISSUER,
+        "ver": int(auth_version or 0),
     }
     token = jwt.encode(payload, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
     return token, jti
@@ -288,6 +290,13 @@ async def get_current_user(
         select(User).where(User.id == user_id, User.status == 1))).scalar_one_or_none()
     if not user:
         logger.info(f"get_current_user 拒绝：uid={user_id} 在 DB 不存在或 status≠1")
+        raise HTTPException(status_code=401, detail="未登录或登录已失效")
+    try:
+        token_version = int(payload.get("ver", 0))
+    except (TypeError, ValueError):
+        token_version = -1
+    if token_version != int(user.auth_version or 0):
+        logger.info("get_current_user 拒绝：uid=%s 会话版本已失效", user_id)
         raise HTTPException(status_code=401, detail="未登录或登录已失效")
     if await _is_user_blacklisted(user_id):
         logger.info(f"get_current_user 拒绝：uid={user_id} 已被拉黑")

@@ -9,6 +9,7 @@
 - 应急恢复：若忘记登录密码，运维删除对应保留键行即回落 .env，无需改代码。
 - 保留键对 /configs 读写屏蔽（见 admin_extra），防止借道配置接口读取或覆写密码哈希。
 """
+import asyncio
 import hashlib
 import hmac
 import secrets
@@ -66,7 +67,8 @@ async def _put_hash(db: AsyncSession, key: str, value: str) -> None:
 async def verify_login_password(db: AsyncSession, provided) -> bool:
     stored = await _get_hash(db, LOGIN_KEY)
     if stored:
-        return bool(provided) and verify_hash(provided, stored)
+        return bool(provided) and await asyncio.to_thread(
+            verify_hash, provided, stored)
     from app.config import settings  # 局部导入避免循环依赖
     expected = settings.ADMIN_TOKEN or ""
     if not expected or not provided:
@@ -84,7 +86,8 @@ async def operate_password_configured(db: AsyncSession) -> bool:
 async def verify_operate_password(db: AsyncSession, provided) -> bool:
     stored = await _get_hash(db, OPERATE_KEY)
     if stored:
-        return bool(provided) and verify_hash(provided, stored)
+        return bool(provided) and await asyncio.to_thread(
+            verify_hash, provided, stored)
     from app.config import settings
     expected = settings.ADMIN_OPERATE_PASSWORD or ""
     if not expected or not provided:
@@ -94,4 +97,14 @@ async def verify_operate_password(db: AsyncSession, provided) -> bool:
 
 async def set_password(db: AsyncSession, target: str, new_password: str) -> None:
     key = LOGIN_KEY if target == "login" else OPERATE_KEY
-    await _put_hash(db, key, _hash_password(new_password))
+    value = await asyncio.to_thread(_hash_password, new_password)
+    await _put_hash(db, key, value)
+
+
+async def hash_user_password(new_password: str) -> str:
+    """Hash a normal-user password off the event loop.
+
+    User login accepts the iteration count embedded in the stored hash, so the
+    credential module's PBKDF2 format is mutually compatible with auth.py.
+    """
+    return await asyncio.to_thread(_hash_password, new_password)

@@ -63,7 +63,7 @@ def gen_apply_no() -> str:
     用 secrets 而不是 random：单号可被用户看到，可预测的自增/伪随机序列
     等于把「平台一天开多少票」这个经营数据暴露出去。
     """
-    return f"IV{time.strftime('%Y%m%d%H%M%S')}{secrets.randbelow(900000) + 100000}"
+    return f"IV{time.strftime('%Y%m%d%H%M%S')}{secrets.token_hex(6).upper()}"
 
 
 async def enabled(db: AsyncSession) -> bool:

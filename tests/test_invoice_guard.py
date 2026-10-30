@@ -292,13 +292,18 @@ async def test_mark_issued_clears_stale_red_flush(db):
 def test_apply_no_is_unpredictable_and_stable_shaped():
     """申请单号可被用户看到：自增或弱随机会把「一天开多少票」这个经营数据漏出去。
 
-    断言形态（IV + 14 位时间 + 6 位随机）与随机位的散布度；后缀若取值过窄
-    （例如只有几位有效熵），别人的单号就能被推算出来。
+    断言形态（IV + 14 位时间 + 12 位密码学随机十六进制）与 48 位后缀空间；
+    原先每秒只有 90 万个数字后缀，在集中开票时会产生真实碰撞。
     """
     nos = [svc.gen_apply_no() for _ in range(100)]
-    assert all(n.startswith("IV") and len(n) == 22 and n[2:].isdigit() for n in nos)
-    # 随机后缀落在 6 位十进制全区间：900000 个取值里抽 100 个，撞车本就罕见，
-    # 所以这里断言的是「取值够散」，而不是「100 次绝不重复」（那会随机的概率性误报）。
-    suffixes = {int(n[16:]) for n in nos}
-    assert len(suffixes) >= 95, f"随机后缀取值过窄（{len(suffixes)}/100），可被推算"
-    assert all(100000 <= s <= 999999 for s in suffixes)
+    assert all(
+        n.startswith("IV")
+        and len(n) == 28
+        and n[2:].isalnum()
+        and n[2:].upper() == n[2:]
+        for n in nos
+    )
+    suffixes = {n[16:] for n in nos}
+    assert len(suffixes) == len(nos)
+    assert all(len(s) == 12 and all(c in "0123456789ABCDEF" for c in s)
+               for s in suffixes)

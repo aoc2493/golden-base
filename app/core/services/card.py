@@ -371,7 +371,7 @@ async def redeem(db: AsyncSession, raw_code: str, user_id: int) -> dict:
         # 卡券已在线下/渠道完成收款，站内这张单只是权益载体，金额恒为 0。
         # 金额为 0 也意味着它不会进入任何退款/对账金额口径。
         amount=Decimal("0.00"),
-        status="completed",
+        status="completed", active_key=None,
         pay_channel=CARD_PAY_CHANNEL,
         paid_at=now,
         fulfilled_at=now,

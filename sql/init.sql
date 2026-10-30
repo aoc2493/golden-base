@@ -4,9 +4,6 @@
 -- 表结构与 ORM 严格一致：列/类型/可空/默认/唯一/索引均取自 models.py 声明。
 -- 不含任何垂直业务表与商品；业务由 app/plugins/<你的业务>/ 提供。
 -- ============================================
-CREATE DATABASE IF NOT EXISTS `app_db` DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-USE `app_db`;
-
 -- ===== 用户表 =====
 CREATE TABLE IF NOT EXISTS `users` (
   `id`                  BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
@@ -16,6 +13,7 @@ CREATE TABLE IF NOT EXISTS `users` (
   `unionid`             VARCHAR(64)  DEFAULT NULL,
   `email`               VARCHAR(255) DEFAULT NULL COMMENT '邮箱（Web 站注册登录）',
   `password_hash`       VARCHAR(255) DEFAULT NULL COMMENT '密码摘要 pbkdf2_sha256$迭代$盐$摘要',
+  `auth_version`        INT          NOT NULL DEFAULT 0 COMMENT '改密后递增，撤销旧会话',
   `phone`               VARCHAR(20)  DEFAULT NULL,
   `nickname`            VARCHAR(50)  DEFAULT NULL,
   `avatar_url`          VARCHAR(500) DEFAULT NULL,
@@ -103,6 +101,7 @@ CREATE TABLE IF NOT EXISTS `orders` (
   `amount`         DECIMAL(10,2)   NOT NULL COMMENT '金额',
   `status`         VARCHAR(20)     DEFAULT 'pending'
                    COMMENT 'pending/completed/refunded/refund_pending/expired/cancelled',
+  `active_key`     VARCHAR(20)     DEFAULT NULL COMMENT 'pending 时为 active，终态置 NULL',
   `pay_channel`    VARCHAR(10)     DEFAULT NULL COMMENT 'wechat/alipay/member',
   `result_ref_id`  BIGINT UNSIGNED DEFAULT NULL COMMENT '关联的前置计算/结果缓存记录ID',
   `input_snapshot` JSON            DEFAULT NULL COMMENT '入参快照',
@@ -122,7 +121,8 @@ CREATE TABLE IF NOT EXISTS `orders` (
   -- 用户「我的订单」与后台列表按 user_id 过滤；关单/查单/对账任务按 (status, created_at) 扫描。
   -- 缺这两条索引时两类查询都是全表扫描，而 orders 是增长最快的一张表。
   INDEX `ix_orders_user_created` (`user_id`, `created_at`),
-  INDEX `ix_orders_status_created` (`status`, `created_at`)
+  INDEX `ix_orders_status_created` (`status`, `created_at`),
+  UNIQUE KEY `uk_order_active_intent` (`user_id`, `sku_code`, `active_key`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='订单表';
 
 -- ===== 会员身份表 =====
@@ -276,6 +276,22 @@ CREATE TABLE IF NOT EXISTS `system_configs` (
   `updated_at`   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   UNIQUE KEY `uk_config_key` (`config_key`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='系统配置表';
+
+-- ===== 密码重置工单 / 一次性验证码 =====
+CREATE TABLE IF NOT EXISTS `password_reset_tickets` (
+  `id`          BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  `user_id`     BIGINT UNSIGNED NOT NULL,
+  `email`       VARCHAR(255) NOT NULL,
+  `code_hash`   VARCHAR(64) NOT NULL,
+  `status`      VARCHAR(20) DEFAULT 'pending' COMMENT 'pending/used/expired/manual',
+  `delivered`   SMALLINT NOT NULL DEFAULT 0,
+  `expires_at`  DATETIME NOT NULL,
+  `used_at`     DATETIME DEFAULT NULL,
+  `created_at`  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX `ix_password_reset_email_status` (`email`, `status`),
+  INDEX `ix_password_reset_user_status` (`user_id`, `status`),
+  INDEX `ix_password_reset_expires_at` (`expires_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='密码重置工单';
 
 -- ===== 推广员表（一级直推）=====
 CREATE TABLE IF NOT EXISTS `distributors` (

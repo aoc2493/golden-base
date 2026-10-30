@@ -31,7 +31,16 @@ jobs:
         run: ruff check .
 
       - name: 单元测试
-        run: pytest
+        run: pytest --cov=app --cov-report=term --cov-fail-under=40
+
+      - name: 类型检查（新增/资金关键模块）
+        run: >-
+          mypy --follow-imports=skip
+          app/core/email.py
+          app/core/services/credential.py
+          app/core/services/refund_state.py
+          app/core/api/common.py
+          app/core/tasks/scheduler.py
 
       - name: 依赖漏洞扫描
         run: pip-audit -r requirements.txt

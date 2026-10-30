@@ -23,6 +23,9 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.venv/
+venv/
+node_modules/
 
 # ===== 备份 / 临时 / 日志 =====
 # 上线前检查实测：.dockerignore 按“相对构建上下文的完整路径”匹配，且 * 不跨 / ——

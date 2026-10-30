@@ -1,20 +1,21 @@
+import asyncio
 import base64
 import hashlib
 import hmac
 import logging
 import re
 import secrets
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from fastapi import APIRouter, Depends, Request, Response, Query
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from typing import Optional
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from app.core.database import get_db
-from app.core.models import User
-from app.core.schemas import LoginRequest, RefreshRequest, WechatLoginRequest, BindInviteRequest, SyncWechatProfileRequest, EmailRegisterRequest, EmailLoginRequest, PasswordResetRequest, SendEmailCodeRequest
+from app.core.models import User, PasswordResetTicket
+from app.core.schemas import LoginRequest, RefreshRequest, WechatLoginRequest, BindInviteRequest, SyncWechatProfileRequest, EmailRegisterRequest, EmailLoginRequest, PasswordResetRequest, PasswordResetConfirmRequest, SendEmailCodeRequest
 from app.core.auth import (create_jwt_token, redis_client, get_current_user, set_auth_cookie,
                            clear_auth_cookie, AUTH_COOKIE_NAME, add_to_blacklist, decode_jwt_token,
                            mark_device_code_released, is_device_code_released)
@@ -25,13 +26,18 @@ from app.core.services import distribution_compliance as compliance_svc
 from app.core.utils.wechat_oauth import build_authorize_url, code2session, oauth_configured, fetch_userinfo
 from app.config import settings
 
-# 邮件发送为可选依赖：未接入邮件服务时（HAS_EMAIL=False）不阻断流程，
-# 非生产环境由 send-code 接口回显 dev_code 以便联调，生产环境必须真正发出。
+# 邮件发送为可选依赖：开发环境无 SMTP 时允许跳过邮箱验证；
+# 生产环境由启动自检拒绝，不能把“看起来像邮箱”当成已验证身份。
 try:
-    from app.core.email import send_verification_code  # type: ignore
-    HAS_EMAIL = True
+    from app.core.email import (
+        is_configured as email_is_configured,
+        send_password_reset_code,
+        send_verification_code,
+    )
+    HAS_EMAIL = bool(email_is_configured())
 except Exception:
     send_verification_code = None
+    send_password_reset_code = None
     HAS_EMAIL = False
 
 logger = logging.getLogger(__name__)
@@ -44,6 +50,8 @@ _REGISTER_WINDOW = 600
 # 不限流即可离线穷举爆破，命中他人设备码就直接接管其账号
 _LOGIN_LIMIT = 20
 _LOGIN_WINDOW = 600
+# A single account must not be brute-forced from a botnet with one IP per guess.
+_ACCOUNT_LOGIN_LIMIT = 10
 # 设备码格式强校验——h5- + 至少 20 位字母数字（主路径为 CSPRNG 生成的 32 位 hex，
 # 存量弱熵用户设备码为 base36 亦可匹配），总长不超过 VARCHAR(64)。
 # 拦截 "h5-1" 之类的低熵值，封堵对设备码空间的离线穷举。
@@ -141,7 +149,8 @@ async def _register_allowed(request: Request) -> bool:
 async def _issue_token(db: AsyncSession, user: User, invite_code):
     if not user.inviter_id and invite_code:
         await bind_inviter(db, user, invite_code)
-    token, _ = create_jwt_token(user.id)
+    token, _ = create_jwt_token(
+        user.id, auth_version=int(user.auth_version or 0))
     return token
 
 
@@ -150,8 +159,19 @@ async def _issue_token(db: AsyncSession, user: User, invite_code):
 # 迭代次数 12 万 → 60 万（OWASP 对 PBKDF2-HMAC-SHA256 的现行下限）：
 # 拖库后的离线爆破成本与迭代次数成正比，12 万在当代 GPU 上已不够看。
 # 兼容说明：哈希串里写死了当次迭代数，verify 按串内值派生，存量密码无需重置；
-# 单次登录派生约 0.2~0.4s（hashlib 走 C 实现），登录接口已有 IP 级限流兜底 CPU 面。
+# 单次派生在审计机约 0.5s；必须通过 asyncio.to_thread 执行，不能阻塞事件循环。
 _PBKDF2_ITERATIONS = 600000
+# Used to make "unknown account" and "wrong password" spend the same time.
+_DUMMY_PASSWORD_HASH = (
+    "pbkdf2_sha256$600000$5402d859e7c81a800674e14c5badf769$"
+    "a2112d2b30746f9934acd15730402740cd57ba083158fa5b6620721bd23b28d5"
+)
+
+
+def _reset_code_digest(code: str) -> str:
+    """Keyed digest prevents a six-digit code from being brute-forced offline."""
+    key = (settings.SENSITIVE_FIELD_KEY or settings.JWT_SECRET_KEY).encode("utf-8")
+    return hmac.new(key, str(code).strip().encode("utf-8"), hashlib.sha256).hexdigest()
 
 
 def _hash_password(password: str) -> str:
@@ -200,7 +220,8 @@ async def authorize_url(request: Request, state: str = Query("", max_length=256)
         return error(ErrorCode.PARAM_ERROR, "服务繁忙，请稍后重试")
     # httpOnly + SameSite=Lax：仅本站 /api/auth 路径携带；微信跳转不影响第一方 Cookie
     resp.set_cookie(_WX_NONCE_COOKIE, nonce, max_age=600, httponly=True,
-                    samesite="lax", path="/api/auth")
+                    samesite="lax", secure=settings.is_prod_env,
+                    path="/api/auth")
     url = build_authorize_url(signed)
     if not url:
         return error(ErrorCode.PARAM_ERROR, "授权回跳域名未配置")
@@ -398,7 +419,8 @@ async def refresh_token(req: RefreshRequest, request: Request, db: AsyncSession 
     user.last_login_type = identity_svc.ID_DEVICE
     user.last_login_value = device_code
     await identity_svc.record_login_identity(db, user.id, identity_svc.ID_DEVICE, device_code)
-    token, _ = create_jwt_token(user.id)
+    token, _ = create_jwt_token(
+        user.id, auth_version=int(user.auth_version or 0))
     resp = JSONResponse(content=success())
     set_auth_cookie(resp, token, request)
     return resp
@@ -575,7 +597,8 @@ async def profile_authorize_url(request: Request, user: User = Depends(get_curre
     if not url:
         return error(ErrorCode.PARAM_ERROR, "授权回跳域名未配置")
     resp.set_cookie(_SYNC_NONCE_COOKIE, nonce, max_age=600, httponly=True,
-                    samesite="lax", path="/api/auth")
+                    samesite="lax", secure=settings.is_prod_env,
+                    path="/api/auth")
     return success({"authorize_url": url})
 
 
@@ -786,14 +809,19 @@ async def email_register(req: EmailRegisterRequest, request: Request,
                                   _REGISTER_LIMIT, _REGISTER_WINDOW):
         return error(ErrorCode.RATE_LIMIT, "操作过于频繁，请稍后再试")
 
-    # 邮箱验证码校验：若此前已为该邮箱下发过验证码，则必须提供且匹配；
-    # 未下发过（无邮件服务/用户未点获取）则跳过，保证当前无邮件环境仍可注册。
+    verification_required = settings.is_prod_env and settings.REQUIRE_EMAIL_VERIFICATION
+    # Production must prove ownership before the address becomes a login
+    # identifier. Development can run without SMTP; production startup refuses
+    # that configuration separately.
     try:
         stored_code = await redis_client.get(f"regcode:{email}")
     except Exception:
         stored_code = None
+    if verification_required and not stored_code:
+        return error(ErrorCode.PARAM_ERROR, "请先获取邮箱验证码")
     if stored_code:
-        if not req.code or str(req.code).strip() != str(stored_code):
+        if not req.code or not hmac.compare_digest(
+                str(req.code).strip(), str(stored_code)):
             return error(ErrorCode.PARAM_ERROR, "验证码无效或已过期，请重新获取")
         try:
             await redis_client.delete(f"regcode:{email}")
@@ -815,7 +843,8 @@ async def email_register(req: EmailRegisterRequest, request: Request,
         logger.info("邮箱注册命中已存在账号 ip=%s", get_client_ip(request))
         return error(ErrorCode.PARAM_ERROR, "该邮箱无法完成注册，请更换邮箱或直接登录")
 
-    user = User(email=email, password_hash=_hash_password(req.password),
+    password_hash = await asyncio.to_thread(_hash_password, req.password)
+    user = User(email=email, password_hash=password_hash,
                 last_login_type="email", last_login_value=email)
     try:
         async with db.begin_nested():
@@ -847,12 +876,20 @@ async def email_login(req: EmailLoginRequest, request: Request,
     if not await redis_rate_limit(redis_client, f"login_limit:{get_client_ip(request)}",
                                   _LOGIN_LIMIT, _LOGIN_WINDOW):
         return error(ErrorCode.RATE_LIMIT, "操作过于频繁，请稍后再试")
+    account_digest = hashlib.sha256(email.encode("utf-8")).hexdigest()[:32]
+    if not await redis_rate_limit(
+            redis_client, f"login_account_limit:{account_digest}",
+            _ACCOUNT_LOGIN_LIMIT, _LOGIN_WINDOW):
+        return error(ErrorCode.RATE_LIMIT, "该账号尝试次数过多，请稍后再试")
 
     # 同上：存量库可能无 uk_users_email，取最早一行避免 MultipleResultsFound
     user = (await db.execute(
         select(User).where(User.email == email, User.status == 1)
         .order_by(User.id).limit(1))).scalars().first()
-    if not user or not _verify_password(req.password, user.password_hash):
+    stored_hash = user.password_hash if user else _DUMMY_PASSWORD_HASH
+    password_ok = await asyncio.to_thread(
+        _verify_password, req.password, stored_hash or _DUMMY_PASSWORD_HASH)
+    if not user or not password_ok:
         return error(ErrorCode.PARAM_ERROR, "邮箱或密码错误")
 
     user.last_login_type = "email"
@@ -867,11 +904,11 @@ async def email_login(req: EmailLoginRequest, request: Request,
 @router.post("/password/reset-request")
 async def password_reset_request(req: PasswordResetRequest, request: Request,
                                  db: AsyncSession = Depends(get_db)):
-    """密码重置申请。
+    """Create a durable reset ticket and send a one-time code when SMTP exists.
 
-    当前未接入邮件服务，因此不走「发重置链接」——邮箱未经验证就发链接等于
-    给任何人提供了重置他人密码的入口。这里转为人工工单：记录审计日志，
-    由客服核验身份后处理。邮箱是否存在都返回相同结果，避免账号枚举。
+    The response is identical for existing and unknown addresses. If SMTP is
+    unavailable, the ticket remains in the database for manual support rather
+    than existing only in a rotating log line.
     """
     email = (req.email or "").strip().lower()
     if not _EMAIL_RE.match(email):
@@ -879,15 +916,111 @@ async def password_reset_request(req: PasswordResetRequest, request: Request,
     if not await redis_rate_limit(redis_client, f"reset_limit:{get_client_ip(request)}",
                                   5, _REGISTER_WINDOW):
         return error(ErrorCode.RATE_LIMIT, "操作过于频繁，请稍后再试")
+    account_digest = hashlib.sha256(email.encode("utf-8")).hexdigest()[:32]
+    if not await redis_rate_limit(
+            redis_client, f"reset_email_limit:{account_digest}", 3, _REGISTER_WINDOW):
+        return error(ErrorCode.RATE_LIMIT, "操作过于频繁，请稍后再试")
 
     user = (await db.execute(
-        select(User.id).where(User.email == email).order_by(User.id).limit(1))).scalars().first()
-    logger.info(f"密码重置申请 email_exists={bool(user)} ip={get_client_ip(request)}")
-    return success({
+        select(User).where(User.email == email, User.status == 1)
+        .order_by(User.id).limit(1))).scalars().first()
+    delivery_available = bool(HAS_EMAIL and send_password_reset_code is not None)
+    dev_code = None
+    delivered = False
+    if user:
+        code = f"{secrets.randbelow(900000) + 100000:06d}"
+        ticket = PasswordResetTicket(
+            user_id=user.id,
+            email=email,
+            code_hash=_reset_code_digest(code),
+            status="pending",
+            delivered=0,
+            expires_at=datetime.now() + timedelta(
+                seconds=settings.PASSWORD_RESET_TTL_SECONDS),
+        )
+        db.add(ticket)
+        await db.flush()
+        # Persist the one-time code before SMTP so a successful delivery can
+        # never be followed by a process crash that erases the ticket.
+        await db.commit()
+        if delivery_available:
+            try:
+                await send_password_reset_code(email, code)
+                ticket.delivered = 1
+                delivered = True
+            except Exception as exc:
+                # Keep the durable manual ticket. Avoid logging the code or
+                # exposing provider details to an unauthenticated caller.
+                logger.error("密码重置邮件发送失败 ticket_id=%s: %s",
+                             ticket.id, type(exc).__name__)
+        elif not settings.is_prod_env:
+            # Development-only self-service path when SMTP is unavailable.
+            dev_code = code
+    logger.info("密码重置工单已创建 email_exists=%s delivered=%s ip=%s",
+                bool(user), delivered,
+                get_client_ip(request))
+    data = {
         "submitted": True,
-        "message": "重置申请已提交。本站暂未接入邮件通道，为加快处理请到「联系我们」页面"
-                    "用同一邮箱留言，客服核验身份后人工协助重置。"
-    })
+        "message": "如该邮箱已注册，重置验证码或人工处理工单已提交。",
+    }
+    if dev_code:
+        data["dev_code"] = dev_code
+    return success(data)
+
+
+@router.post("/password/reset-confirm")
+async def password_reset_confirm(req: PasswordResetConfirmRequest, request: Request,
+                                 db: AsyncSession = Depends(get_db)):
+    """Consume a one-time reset code and replace the account password."""
+    email = (req.email or "").strip().lower()
+    if not _EMAIL_RE.match(email):
+        return error(ErrorCode.PARAM_ERROR, "邮箱格式不正确")
+    ip_key = get_client_ip(request)
+    if not await redis_rate_limit(redis_client, f"reset_confirm_ip:{ip_key}", 10, 600):
+        return error(ErrorCode.RATE_LIMIT, "操作过于频繁，请稍后再试")
+    account_digest = hashlib.sha256(email.encode("utf-8")).hexdigest()[:32]
+    if not await redis_rate_limit(
+            redis_client, f"reset_confirm_account:{account_digest}", 5, 600):
+        return error(ErrorCode.RATE_LIMIT, "操作过于频繁，请稍后再试")
+
+    ticket = (await db.execute(
+        select(PasswordResetTicket).where(
+            PasswordResetTicket.email == email,
+            PasswordResetTicket.status == "pending",
+        ).order_by(PasswordResetTicket.id.desc()).limit(1))).scalars().first()
+    supplied_hash = _reset_code_digest(req.code)
+    valid = bool(
+        ticket
+        and ticket.expires_at > datetime.now()
+        and hmac.compare_digest(ticket.code_hash, supplied_hash)
+    )
+    if not valid:
+        return error(ErrorCode.PARAM_ERROR, "验证码无效或已过期")
+
+    user = (await db.execute(
+        select(User).where(User.id == ticket.user_id, User.status == 1)
+    )).scalar_one_or_none()
+    if not user:
+        return error(ErrorCode.PARAM_ERROR, "验证码无效或已过期")
+    claimed = (await db.execute(
+        update(PasswordResetTicket)
+        .where(PasswordResetTicket.id == ticket.id,
+               PasswordResetTicket.status == "pending")
+        .values(status="used", used_at=datetime.now())
+    )).rowcount
+    if not claimed:
+        return error(ErrorCode.PARAM_ERROR, "验证码无效或已过期")
+    new_hash = await asyncio.to_thread(_hash_password, req.new_password)
+    user.password_hash = new_hash
+    user.auth_version = int(user.auth_version or 0) + 1
+    await db.execute(
+        update(PasswordResetTicket)
+        .where(PasswordResetTicket.user_id == user.id,
+               PasswordResetTicket.status == "pending")
+        .values(status="expired")
+    )
+    logger.info("密码已通过一次性验证码重置 user_id=%s", user.id)
+    return success(msg="密码已重置，请使用新密码登录")
 
 
 @router.post("/email/send-code")
@@ -898,7 +1031,7 @@ async def email_send_code(req: SendEmailCodeRequest, request: Request,
     安全边界：
      · 同 IP 限流，防止被当作邮件炸弹 / 批量枚举；
      · 验证码存 Redis（TTL 10 分钟），由服务端在校验时比对，前端无法伪造；
-     · 未接入真实邮件服务时，仅非生产环境回显 dev_code 便于联调；生产环境必须走真实邮件，
+     · 未接入真实邮件服务时拒绝发送；生产环境必须走真实邮件，
        绝不通过接口返回明文验证码（否则验证码形同虚设）。
     """
     email = (req.email or "").strip().lower()
@@ -915,24 +1048,34 @@ async def email_send_code(req: SendEmailCodeRequest, request: Request,
         return error(ErrorCode.PARAM_ERROR, "邮箱验证通道暂未开通，请直接完成注册")
     if not await redis_rate_limit(redis_client, f"sendcode_limit:{get_client_ip(request)}", 5, 3600):
         return error(ErrorCode.RATE_LIMIT, "操作过于频繁，请稍后再试")
+    account_digest = hashlib.sha256(email.encode("utf-8")).hexdigest()[:32]
+    if not await redis_rate_limit(
+            redis_client, f"sendcode_email_limit:{account_digest}", 3, 3600):
+        return error(ErrorCode.RATE_LIMIT, "操作过于频繁，请稍后再试")
 
     code = f"{secrets.randbelow(900000) + 100000:06d}"
     try:
-        await redis_client.set(f"regcode:{email}", code, ex=600)
+        await redis_client.set(
+            f"regcode:{email}", code,
+            ex=settings.EMAIL_VERIFICATION_TTL_SECONDS,
+        )
     except Exception:
         logger.exception("注册验证码写 Redis 失败 email=%s", email)
         return error(ErrorCode.SERVER_ERROR, "验证码服务暂不可用，请稍后重试")
 
-    sent = False
-    if HAS_EMAIL and send_verification_code is not None:
+    try:
+        await send_verification_code(email, code)
+    except Exception as e:
+        # Do not leave a code that the user never received. Clearing it also
+        # lets the user retry instead of locking the address for its TTL.
         try:
-            await send_verification_code(email, code)
-            sent = True
-        except Exception as e:
-            logger.warning("注册验证码邮件发送失败（已落库）: %s", e)
+            await redis_client.delete(f"regcode:{email}")
+        except Exception:
+            pass
+        logger.error("注册验证码邮件发送失败: %s", type(e).__name__)
+        return error(ErrorCode.SERVER_ERROR, "验证码发送失败，请稍后重试")
 
-    data = {"message": "验证码已发送，请查收邮箱", "expire_seconds": 600}
-    # 邮件实际未发出时，仅在非生产环境回显，便于联调；生产环境不回显明文验证码
-    if not sent and not settings.is_prod_env:
-        data["dev_code"] = code
-    return success(data)
+    return success({
+        "message": "验证码已发送，请查收邮箱",
+        "expire_seconds": settings.EMAIL_VERIFICATION_TTL_SECONDS,
+    })

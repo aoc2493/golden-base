@@ -111,7 +111,8 @@ async def _mark_order_paid(db: AsyncSession, order: Order, pay_trade_no,
         .where(Order.id == order.id,
                Order.fulfilled_at.is_(None),
                Order.status.notin_(["completed", "refunded"]))
-        .values(status="completed", paid_at=order.paid_at or now, pay_trade_no=new_trade_no)
+        .values(status="completed", active_key=None,
+                paid_at=order.paid_at or now, pay_trade_no=new_trade_no)
         .execution_options(synchronize_session=False))).rowcount
     if not claimed:
         # 落败方：另一条回调已抢占并履约（或订单已退款）。刷新到最新状态后幂等返回，

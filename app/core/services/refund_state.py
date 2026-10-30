@@ -58,7 +58,7 @@ async def apply_channel_refund_status(db: AsyncSession, refund: Refund,
         if order:
             revoked = (await db.execute(
                 update(Order).where(Order.id == order.id, Order.status != "refunded")
-                .values(status="refunded")
+                .values(status="refunded", active_key=None)
                 .execution_options(synchronize_session=False))).rowcount
             if revoked:
                 # 刷新携带 CAS 写入的 status，revoke 内部会按订单状态联动发票与报告
@@ -87,7 +87,7 @@ async def apply_channel_refund_status(db: AsyncSession, refund: Refund,
         if order and order.status == "refund_pending":
             await db.execute(update(Order).where(
                 Order.id == order.id, Order.status == "refund_pending")
-                .values(status="completed"))
+                .values(status="completed", active_key=None))
         await db.flush()
         logger.warning(f"退款被渠道判失败 order={order.order_no if order else refund.order_id} "
                        f"refund_no={refund.refund_no} channel_status={st} source={source}")

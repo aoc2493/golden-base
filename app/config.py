@@ -82,6 +82,9 @@ class Settings(BaseSettings):
     #   proxy_set_header X-Proxy-Auth "同值";
     # 留空 = 不启用该校验（保持原行为）。
     PROXY_AUTH_SECRET: str = ""
+    # Shared secret presented by an upstream load balancer/host Nginx to the
+    # bundled Nginx. Only a request carrying it may contribute X-Real-IP.
+    EDGE_PROXY_AUTH_SECRET: str = ""
     # 严格 IP 策略开关（默认关闭以保持可上线）：
     # 下面两项（管理 IP 白名单未配、信任反代头但未配共享密钥）此前一律只告警不阻断，
     # 原因写在 main.py 启动自检里——无固定办公出口 IP 的合法部署若强制白名单会「上线即起不来」，
@@ -109,6 +112,18 @@ class Settings(BaseSettings):
     # 升级后新签发的令牌 aud/iss 会变化，旧令牌将校验失败（需重新登录）。
     JWT_AUDIENCE: str = "app-web"
     JWT_ISSUER: str = "app-backend"
+    # 邮箱验证与密码重置使用标准 SMTP。未配置时开发环境仍可注册，
+    # 生产环境由启动自检拒绝，避免把“字符串像邮箱”误当成已验证身份。
+    EMAIL_SMTP_HOST: str = ""
+    EMAIL_SMTP_PORT: int = 587
+    EMAIL_SMTP_USER: str = ""
+    EMAIL_SMTP_PASSWORD: str = ""
+    EMAIL_SMTP_FROM: str = ""
+    EMAIL_SMTP_TLS: bool = True
+    EMAIL_VERIFICATION_TTL_SECONDS: int = 600
+    PASSWORD_RESET_TTL_SECONDS: int = 1800
+    # 生产环境必须验证邮箱所有权；关闭只允许用于内网、受控账号体系。
+    REQUIRE_EMAIL_VERIFICATION: bool = True
     # 敏感字段（提现实名/收款人姓名/收款账号）落库加密密钥，见 utils/crypto_field.py。
     # 与 JWT 同一哲学：fail-closed，未配置或仍用占位值一律阻断启动。密钥一旦上线不得更换：
     # 换了之后已入库的密文全部解不开（收款账号再也读不出来，打款链路断）。

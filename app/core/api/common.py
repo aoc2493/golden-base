@@ -185,20 +185,30 @@ return 0
 _DEGRADED_LOCK_TOKEN = "__redis_degraded__"
 
 
-async def redis_acquire_lock(redis_client, key: str, ttl_seconds: int) -> str:
+async def redis_acquire_lock(redis_client, key: str, ttl_seconds: int,
+                             fail_closed: bool | None = None) -> str:
     """SETNX 互斥锁：抢到返回锁令牌（非空字符串），未抢到返回空串。
     用于堆叠数据库唯一约束拦不住的并发重复入口
     （如并发创建两张不同订单、各自触发一次付费第三方 API）。
-    TTL 必须给足：进程崩溃时靠 TTL 自动释放，不会永久死锁。Redis 故障时降级放行。
+    TTL 必须给足：进程崩溃时靠 TTL 自动释放，不会永久死锁。Redis 故障默认遵循
+    REDIS_FAIL_CLOSED；确有独立数据库护栏的调用方可显式选择降级放行。
 
     返回值由 bool 改为令牌字符串，`if not await redis_acquire_lock(...)` 的判空写法不变；
     令牌必须原样传给 redis_release_lock，否则释放会静默失效（宁可留到 TTL 过期）。"""
     token = secrets.token_urlsafe(24)
+    if redis_client is None:
+        return _DEGRADED_LOCK_TOKEN
     try:
         ok = await redis_client.set(key, token, nx=True, ex=ttl_seconds)
         return token if ok else ""
     except Exception as e:
-        logger.warning(f"互斥锁异常，降级放行 key={key}: {e}")
+        should_close = settings.REDIS_FAIL_CLOSED if fail_closed is None else fail_closed
+        if should_close:
+            logger.error("互斥锁异常，按 fail-closed 拒绝进入临界区 key=%s: %s",
+                         key, e)
+            return ""
+        logger.warning("互斥锁异常，存在独立数据库护栏，降级放行 key=%s: %s",
+                       key, e)
         return _DEGRADED_LOCK_TOKEN
 
 
@@ -219,7 +229,8 @@ async def redis_release_lock(redis_client, key: str, token: str = "") -> None:
         logger.warning(f"互斥锁释放异常 key={key}: {e}")
 
 
-async def redis_acquire_lock_fresh(db, redis_client, key: str, ttl_seconds: int) -> str:
+async def redis_acquire_lock_fresh(db, redis_client, key: str, ttl_seconds: int,
+                                   fail_closed: bool | None = None) -> str:
     """抢互斥锁，抢到后立即结束当前事务以丢弃陈旧读快照；未抢到返回空串。
 
     为什么必须「换快照」：生产 MySQL 默认 REPEATABLE-READ，一致性读走的是「本事务第一次
@@ -230,7 +241,8 @@ async def redis_acquire_lock_fresh(db, redis_client, key: str, ttl_seconds: int)
 
     仅用于「先抢锁 → 再计数/查重 → 再写入」的临界区。SQLite 单机串行写不存在该窗口，
     commit 在无活动事务时也是安全的空操作。"""
-    token = await redis_acquire_lock(redis_client, key, ttl_seconds)
+    token = await redis_acquire_lock(
+        redis_client, key, ttl_seconds, fail_closed=fail_closed)
     if not token:
         return ""
     await db.commit()

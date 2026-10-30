@@ -18,6 +18,9 @@ def _prod_ready(monkeypatch):
     monkeypatch.setattr(settings, "ADMIN_OPERATE_PASSWORD", "strong-operate-password", raising=False)
     monkeypatch.setattr(settings, "AI_MARK_PROVIDER_NAME", "Example Provider", raising=False)
     monkeypatch.setattr(settings, "DB_TYPE", "sqlite", raising=False)
+    monkeypatch.setattr(settings, "REQUIRE_EMAIL_VERIFICATION", True, raising=False)
+    monkeypatch.setattr(settings, "EMAIL_SMTP_HOST", "smtp.example.com", raising=False)
+    monkeypatch.setattr(settings, "EMAIL_SMTP_FROM", "noreply@example.com", raising=False)
     # 合规缺口确认位默认 False（未确认即拒启动），这里默认打开，
     # 免得每个用例都因它失败而看不见自己要测的那一项——它本身另有专门用例覆盖。
     monkeypatch.setattr(settings, "COMPLIANCE_DECISIONS_ACK", True, raising=False)
@@ -39,6 +42,24 @@ def test_example_secrets_blocked_in_production(monkeypatch):
                         raising=False)
 
     with pytest.raises(RuntimeError, match="SENSITIVE_FIELD_KEY 仍是 .env.example 的示例值"):
+        _startup_check()
+
+
+def test_missing_email_transport_blocks_production_when_verification_required(monkeypatch):
+    _prod_ready(monkeypatch)
+    monkeypatch.setattr(settings, "PAYMENT_MOCK", False, raising=False)
+    monkeypatch.setattr(settings, "EMAIL_SMTP_HOST", "", raising=False)
+    with pytest.raises(RuntimeError, match="SMTP 未配置"):
+        _startup_check()
+
+
+def test_trusted_proxy_requires_shared_secrets_in_production(monkeypatch):
+    _prod_ready(monkeypatch)
+    monkeypatch.setattr(settings, "PAYMENT_MOCK", False, raising=False)
+    monkeypatch.setattr(settings, "TRUST_PROXY_HEADERS", True, raising=False)
+    monkeypatch.setattr(settings, "PROXY_AUTH_SECRET", "", raising=False)
+    monkeypatch.setattr(settings, "EDGE_PROXY_AUTH_SECRET", "", raising=False)
+    with pytest.raises(RuntimeError, match="PROXY_AUTH_SECRET|EDGE_PROXY_AUTH_SECRET"):
         _startup_check()
 
 

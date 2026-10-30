@@ -111,6 +111,8 @@ _SAMPLE_SECRET_VALUES = {
     "JWT_SECRET_KEY": "dev-only-jwt-secret-please-replace-0123456789abcdef",
     "ADMIN_TOKEN": "dev-admin-token-replace-me",
     "SENSITIVE_FIELD_KEY": "dev-only-sensitive-field-key-0123456789",
+    "PROXY_AUTH_SECRET": "dev-backend-proxy-secret-change-me",
+    "EDGE_PROXY_AUTH_SECRET": "dev-edge-proxy-secret-change-me",
 }
 
 
@@ -205,6 +207,16 @@ def _startup_check():
                 "docker-compose 已用 healthcheck 保证 Redis 先于后端就绪，无明确可用性诉求请保持默认 true")
         if not settings.cors_origins_list:
             errors.append("生产环境必须配置 CORS_ORIGINS（H5 前端域名），禁止放行所有来源")
+        if settings.REQUIRE_EMAIL_VERIFICATION:
+            try:
+                from app.core.email import is_configured as email_is_configured
+                email_ready = email_is_configured()
+            except Exception:
+                email_ready = False
+            if not email_ready:
+                errors.append(
+                    "生产环境要求邮箱验证，但 SMTP 未配置完整"
+                    "（EMAIL_SMTP_HOST 与 EMAIL_SMTP_FROM/EMAIL_SMTP_USER）")
         # 支付回调必须 HTTPS
         for url_name in ("WECHAT_NOTIFY_URL", "ALIPAY_NOTIFY_URL"):
             url = getattr(settings, url_name, "")
@@ -251,14 +263,17 @@ def _startup_check():
         # 信任反代头但未配共享密钥 → 同机任何进程（运维脚本、容器内副服务、被渗透的旁路
         # 容器）都可直连 127.0.0.1:8000 并伪造 X-Real-IP，从而绕过 IP 维度限流、管理端爆破锁定、
         # 以及将来任何基于 IP 的安全策略。不阻断（同上：合理部署可能确实不配密钥），用最高告警。
-        if settings.TRUST_PROXY_HEADERS and not (settings.PROXY_AUTH_SECRET or "").strip():
+        if settings.TRUST_PROXY_HEADERS and len(
+                (settings.PROXY_AUTH_SECRET or "").strip()) < 16:
             _msg = ("TRUST_PROXY_HEADERS=true 但 PROXY_AUTH_SECRET 未配置：同机进程可直连 "
                     "127.0.0.1:8000 并伪造 X-Real-IP，绕过 IP 维度限流与管理端爆破锁定；"
                     "请配置密钥并让反向代理注入 X-Proxy-Auth 头（至少 32 位随机串）")
-            if settings.SECURITY_STRICT_IP_POLICY:
-                errors.append(_msg + "（SECURITY_STRICT_IP_POLICY=true，已升级为阻断项）")
-            else:
-                advisories.append(_msg + "；确认无法注入该头时可置 SECURITY_STRICT_IP_POLICY=false 保持现状")
+            errors.append(_msg)
+        if settings.TRUST_PROXY_HEADERS and len(
+                (settings.EDGE_PROXY_AUTH_SECRET or "").strip()) < 16:
+            errors.append(
+                "TRUST_PROXY_HEADERS=true 时必须配置至少 16 位的 "
+                "EDGE_PROXY_AUTH_SECRET；外层代理只有携带该密钥才能提交可信 X-Real-IP")
         # 告警通道。不做硬阻断的理由与 IP 白名单一致：没配机器人也能合法上线（自己看日志），
         # 但资金类故障（退款重试耗尽、金额与渠道不符、对账差错）的发现时延直接等于资损金额，
         # 所以用最高级别的醒目告警提示，而不是静默跳过。
@@ -518,7 +533,8 @@ app.add_middleware(
     allow_credentials=bool(_origins and _origins != ["*"]),
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization", "X-Requested-With",
-                   "X-CSRF-Token", "X-Admin-Token", "X-Request-ID"],
+                   "X-CSRF-Token", "X-Admin-Token", "X-Operate-Password",
+                   "X-Request-ID"],
 )
 
 # gzip：静态资源是纯文本（html/css/js），压缩率约 3~4:1，收益直接。
@@ -931,7 +947,22 @@ async def server_info():
 
 @app.get("/health")
 async def health():
-    """对外只返回笼统状态，不暴露 DB/Redis 细节"""
+    """Liveness plus dependency readiness without exposing internal details."""
+    from sqlalchemy import text
+    from app.core.database import AsyncSessionLocal
+    from app.core.auth import redis_client
+
+    try:
+        async with AsyncSessionLocal() as db:
+            await db.execute(text("SELECT 1"))
+        if settings.is_prod_env and redis_client is not None:
+            await redis_client.ping()
+    except Exception as exc:
+        logger.error("健康检查失败: %s", type(exc).__name__)
+        return JSONResponse(
+            status_code=503,
+            content={"code": 5000, "msg": "dependency unavailable", "data": None},
+        )
     return {"code": 0, "msg": "ok", "data": {"status": "healthy"}}
 
 

@@ -48,13 +48,23 @@ AI_MARK_PROVIDER_NAME=<真实主体名称>
 DB_PASSWORD=<强密码>
 MYSQL_ROOT_PASSWORD=<强密码>
 REDIS_PASSWORD=<强密码>
+PROXY_AUTH_SECRET=<至少32位随机串，供nginx注入X-Proxy-Auth>
+EDGE_PROXY_AUTH_SECRET=<至少32位随机串，供外层LB/Host nginx注入X-Proxy-Auth>
+EMAIL_SMTP_HOST=<SMTP主机>
+EMAIL_SMTP_PORT=587
+EMAIL_SMTP_USER=<SMTP用户名>
+EMAIL_SMTP_PASSWORD=<SMTP密码>
+EMAIL_SMTP_FROM=<发件地址>
 ```
 
 - `SENSITIVE_FIELD_KEY` 一旦上线不得更换：换了之后已入库的密文全部解不开。
 - `TRUST_PROXY_HEADERS=true` 时务必同时配置 `PROXY_AUTH_SECRET`，并让 nginx 注入
   `X-Proxy-Auth`（本仓库 `nginx/nginx.conf` 已注入），否则限流与管理端爆破锁定可被伪造头绕过。
 - `.env.example` 里的 `dev-*` 示例口令（JWT/ADMIN_TOKEN/SENSITIVE_FIELD_KEY/DB_PASSWORD/
-  REDIS_PASSWORD）在生产启动时按值阻断，照抄示例文件上不了线。
+  REDIS_PASSWORD/PROXY_AUTH_SECRET/EDGE_PROXY_AUTH_SECRET）在生产启动时按值阻断，
+  照抄示例文件上不了线。
+- `REQUIRE_EMAIL_VERIFICATION=true`（默认）时生产环境必须配置 SMTP，否则注册邮箱只是
+  自报字符串，启动自检会直接拒绝。
 - 三项法定义务控制默认按「开箱可用」关闭，而生产环境要求有人显式确认过才允许启动：
   先逐项判断本部署的处置，再在 `.env` 写明 `COMPLIANCE_DECISIONS_ACK=true`；
   未确认时启动自检把当前仍关闭的项列为阻断项（拒绝启动），确认后每次启动仍以 ERROR 级
@@ -75,6 +85,17 @@ docker compose up --build -d
 ```
 
 - 默认对外端口 `HTTP_PORT=8080`；生产建议在前置网关（云 LB / 宿主 nginx / certbot）终结 TLS 后回源。
+  若使用前置网关，必须为 `EDGE_PROXY_AUTH_SECRET` 配置随机长串，并让前置网关覆写
+  `X-Real-IP` 与 `X-Proxy-Auth`；否则容器内 Nginx 会拒绝采信代理传入的客户端 IP，
+  所有用户将共享外层网关这一个限流桶。
+
+  外层 Nginx 示例：
+
+  ```nginx
+  proxy_set_header X-Real-IP $remote_addr;
+  proxy_set_header X-Proxy-Auth "<EDGE_PROXY_AUTH_SECRET>";
+  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+  ```
 - MySQL / Redis 不映射宿主端口，只在 compose 内网可达。
 - 容器非 root、`cap_drop: ALL`、`no-new-privileges`。
 - `backend` 通过 healthcheck 等 MySQL/Redis 真正可连再启动（首次初始化会跑 init.sql，约需数十秒）。

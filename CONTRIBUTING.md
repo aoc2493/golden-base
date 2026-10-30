@@ -24,7 +24,7 @@ CI 有三个作业，任何一个红都不能合并：
 
 | 作业 | 跑什么 |
 | --- | --- |
-| 静态检查 / 测试 | `ruff check app tests` + `pytest`（默认 SQLite 内存库）+ `pip-audit` |
+| 静态检查 / 测试 | `ruff check app tests` + 覆盖率门禁测试 + 关键模块 Mypy + `pip-audit` |
 | 测试 / MySQL | 同一个 `pytest`，但作业环境变量 `DB_TYPE=mysql`，打真实 MySQL 8 服务 |
 | 密钥扫描 | `gitleaks` 扫全历史 |
 
