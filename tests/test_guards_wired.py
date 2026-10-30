@@ -1,8 +1,6 @@
-"""三处「文档承诺了、代码没做」的控制点，现在必须真的被执行。
+"""接线控制点：接口文档承诺的校验必须由实际代码执行。
 
-这三条都是本仓库真实存在过的缺陷形态：注释/接口文档写着有校验，代码里没有那一步，
-或写了但取值取错导致永远不进分支。测试的作用是把「说了」和「做了」钉在一起——
-删掉对应代码行，用例必须变红。
+测试把文档、路由与服务实现绑定在一起；删除对应校验或接错取值时，用例必须失败。
 """
 from datetime import datetime
 from decimal import Decimal
@@ -20,9 +18,8 @@ DEVICE_CODE = "h5-" + "a1b2c3d4e5f6g7h8i9j0k1l2"  # 与 _DEVICE_CODE_RE 同格�
 async def test_released_device_code_cannot_log_in(client, monkeypatch):
     """已解绑的设备码登录必须被明确拒绝，且不得静默发出新会话。
 
-    /device/release 的接口文档承诺「凭证失效后该设备再登录会收到明确提示，不会静默
-    新建一个空账号」；解绑会把 users.device_code 置空，所以缺了这道校验时，旧码会
-    落到「查无用户 → 新建账号」分支——用户视角是订单/会员全没了。
+    /device/release 的接口契约是凭证失效后再次登录必须收到明确提示，不能静默
+    新建空账号。解绑会置空 users.device_code，因此登录链路必须先查询已释放标记。
     """
     from app.core.api import auth as auth_api
 
@@ -43,10 +40,8 @@ async def test_released_device_code_cannot_log_in(client, monkeypatch):
 async def test_login_honours_rate_limiter_verdict(client, monkeypatch):
     """限流器判定超限时，设备码登录必须直接拒绝且不发会话。
 
-    本机没有 Redis，`redis_rate_limit` 在测试里只会降级放行，于是「爆破被拦住」这件事
-    无法用真 Redis 验证。这里注入判定结果，证明的是另一半事实：登录链路把限流判定
-    当作放行条件（而不是算完就丢），且被拒的那一次不会顺带建号、签发 Cookie。
-    限流器自身（Lua 滑动窗口）没有真 Redis 就测不到，属已知未覆盖缺口，见风险台账。
+    测试注入限流判定，验证登录链路把判定结果当作放行条件，且被拒的请求不会建号、
+    不会签发 Cookie。Lua 滑动窗口本身需要真实 Redis 环境验证。
     """
     from app.core.api import auth as auth_api
 
@@ -94,7 +89,7 @@ async def test_favorite_is_unique_per_user_item(db):
 
 async def test_favorite_add_twice_returns_same_row(db):
     """重复收藏走幂等返回，不产生第二行。"""
-    user = User(phone="13900000031", nickname="收藏者")
+    user = User(nickname="收藏者")
     db.add(user)
     await db.flush()
     order = Order(order_no="FAV-1", user_id=user.id, product_name="报告",
@@ -114,7 +109,7 @@ async def test_favorite_add_twice_returns_same_row(db):
 
 
 async def _make_refund(db, amount="39.90", status="processing"):
-    user = User(phone="13900000032", nickname="退款者")
+    user = User(nickname="退款者")
     db.add(user)
     await db.flush()
     order = Order(order_no="RF-1", user_id=user.id, product_name="报告",
@@ -132,7 +127,7 @@ async def _make_refund(db, amount="39.90", status="processing"):
 async def test_wechat_refund_callback_amount_mismatch_is_rejected(db):
     """退款回调金额与订单金额不符必须拒绝迁移（本底盘退款一律全额）。
 
-    此前的写法取 result["amount"]（退款回调分支从不写这个键）与 refund.amount
+    退款回调分支不写 result["amount"]，因此校验必须使用 refund_amount 与 refund.amount
     （Refund 表没有这一列），两个都是 None → 校验永远不进分支，等于没有。
     """
     order, refund = await _make_refund(db)

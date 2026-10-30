@@ -244,18 +244,18 @@ async def bind_inviter(db: AsyncSession, user: User, invite_code: Optional[str],
         logger.warning(f"同人设备自绑拦截：invitee={user.id} inviter={inviter_dist.user_id} "
                        f"device_code={user.device_code[:8]}… 拒绝建立推广关系")
         return False
-    # 并发绑定修复（4 worker 下真实可触发）：上方 user.inviter_id 判断读的是会话内存快照。
-    # 授权回调与兜底登录回调都可能携带邀请码，多 worker 同时处理同一用户的这两个请求时，
-    # 双方都能读到 None 并各自写回——后写覆盖先写，且两个推广员的 invite_count 各 +1：
+    # 上方 user.inviter_id 判断读的是会话内存快照。授权回调与兜底登录回调都可能携带
+    # 邀请码，多 worker 同时处理时双方都能读到 None 并各自写回，导致后写覆盖先写、
+    # 两个推广员的 invite_count 各 +1：
     # 用户最终只归属其中一人，另一人的邀请数被凭空虚增（晋升进度失真、数据对不上账）。
-    # 改为带 inviter_id IS NULL 条件的原子 UPDATE 抢占：只有真正把 NULL 改成推广员 uid 的
-    # 那一次才继续累计邀请数，与全文件 CAS 范式保持一致。
+    # 带 inviter_id IS NULL 条件的原子 UPDATE 只有真正把 NULL 改成推广员 uid 的那一次
+    # 才继续累计邀请数，与全文件 CAS 范式保持一致。
     moved = (await db.execute(
         update(User).where(User.id == user.id, User.inviter_id.is_(None)).values(
             inviter_id=inviter_dist.user_id, invited_at=now)
         .execution_options(synchronize_session=False))).rowcount
     if not moved:
-        logger.info(f"并发绑定已被抢先完成，本次放弃 user_id={user.id} "
+        logger.info(f"并发绑定已被抢先完成，该次放弃 user_id={user.id} "
                     f"inviter={inviter_dist.user_id}")
         return False
     user.inviter_id = inviter_dist.user_id
@@ -265,7 +265,7 @@ async def bind_inviter(db: AsyncSession, user: User, invite_code: Optional[str],
         update(Distributor).where(Distributor.id == inviter_dist.id).values(
             invite_count=func.coalesce(Distributor.invite_count, 0) + 1
         ).execution_options(synchronize_session="fetch"))
-    # 回填触达记录的 bound_user_id（仅本次归因命中的访客），便于对账与防作弊溯源
+    # 回填触达记录的 bound_user_id（仅该次归因命中的访客），便于对账与防作弊溯源
     if vk:
         await db.execute(
             update(AttributionTouch).where(
@@ -280,11 +280,10 @@ async def ensure_distributor(db: AsyncSession, user: User) -> Distributor:
     dist = (await db.execute(select(Distributor).where(Distributor.user_id == user.id))).scalar_one_or_none()
     if dist:
         return dist
-    # 并发建号修复（生产为 4 个 uvicorn worker，前端首屏会并发拉取分销页多个接口）：
-    # 这里不能用「直接 INSERT + 捕获 uk_user 冲突兜底」——撞唯一键后 MySQL 侧残留的插入
-    # 意向锁/间隙锁会让随后的补偿查询与对手事务互相等待（压测复现 1213 Deadlock），且
-    # REPEATABLE READ 的快照读看不到对手尚未提交的行，无法幂等返回（压测复现 500）。
-    # 改为先对 users 行加记录锁把临界区串行化：该行必然存在，只加记录锁、不引入间隙锁，
+    # 多 worker 下前端首屏会并发拉取分销页多个接口。不能使用「直接 INSERT + 捕获
+    # uk_user 冲突兜底」：唯一键冲突后的意向锁/间隙锁可能导致死锁，REPEATABLE READ
+    # 快照读也看不到对手尚未提交的行。先对 users 行加记录锁可串行化临界区；
+    # 该行必然存在，只加记录锁、不引入间隙锁，
     # 同一用户的并发请求在此排队，先到者建档并提交，后者取得锁后重查即命中。
     await db.execute(
         select(User.id).where(User.id == user.id).with_for_update())
@@ -512,8 +511,8 @@ async def recheck_pending_promotion(db: AsyncSession, dist: Distributor) -> bool
 
     第三十五条第3款：已获等级不降级，只撤销尚未生效的待升。
     撤销口径必须与晋升口径同源。退款会同时冲减验证付费用户数（_rollback_verified_user）
-    与月度业绩（bump_monthly_total 负值），原实现只看人数——业绩已跌破门槛的人仍会在次日0点
-    升上去，等于用退款刷出了等级。故改为任一维度不再达标即撤销。
+    与月度业绩（bump_monthly_total 负值）；任一维度不再达标都必须撤销，避免退款后
+    仍在次日 0 点升级。
     """
     if dist.next_level is None:
         return False
@@ -561,10 +560,8 @@ async def apply_pending_promotions(db: AsyncSession, batch_size: int = 200) -> i
 async def settle_due_commissions(db: AsyncSession, batch_size: int = 100) -> int:
     """分批处理 pending 佣金，避免一次性全表加载。
 
-    死循环成因：原实现对“未到期”的记录 continue 但不改其状态，下一轮 SELECT
-    又选中同一批；当未到期记录数 >= batch_size 时 len(logs) == batch_size，
-    末尾的 break 条件永不成立 → while True 无限循环，调度任务永久挂起并占住会话。
-    改为按 id 游标单向推进，保证每条记录在一次运行内只被考察一次。"""
+    按 id 游标单向推进，保证每条记录在一次运行内只被考察一次。若“未到期”记录
+    只 continue 而不推进游标，同一批记录会被反复选中，调度任务可能永久挂起并占住会话。"""
     settle_days = await get_int(db, "commission_settle_days", settings.COMMISSION_SETTLE_DAYS)
     now = datetime.now()
     settled = 0
@@ -647,10 +644,9 @@ async def _cancel_one(db: AsyncSession, log: CommissionLog) -> None:
     dist = await db.get(Distributor, log.distributor_id)
     amt = Decimal(str(log.amount))
     if dist:
-        # 冲回一律改为数据库侧的相对量原子 UPDATE。原实现是「读余额→内存计算→写绝对值」，
-        # SQLite 下 row_lock 退化为无锁，同一推广员的两笔退款并发冲回会各自读到旧余额、
-        # 各自写回绝对值，后写的覆盖先写的——冲回金额凭空少算一次，佣金账面与流水对不上。
-        # 与同文件提现扣款的 CAS 修复同一思路。
+        # 冲回使用数据库侧的相对量原子 UPDATE，而不是「读余额→内存计算→写绝对值」。
+        # 后者在无行锁的 SQLite 下会让并发退款互相覆盖，佣金账面与流水对不上。
+        # 与同文件提现扣款使用同一套 CAS 口径。
         # synchronize_session="fetch"：让 ORM 身份映射里的 dist 同步到最新值，
         # 否则同一会话后续再读 dist 会拿到冲回前的旧余额。
         if prev == "pending":
@@ -787,7 +783,7 @@ async def apply_withdrawal(db, user, amount, channel, account_name, account_no):
     withdraw_min = _money(await get_float(db, "withdraw_min", settings.WITHDRAW_MIN))
     if amt < withdraw_min:
         return False, f"满 {withdraw_min} 元才可提现", None
-    # 先确保推广员存在，再对其加行锁（修复先锁后建的竞态）
+    # 先确保推广员存在，再对其加行锁
     dist = await ensure_distributor(db, user)
     dist = (await db.execute(
         row_lock(select(Distributor).where(Distributor.id == dist.id)))).scalar_one_or_none()
@@ -808,7 +804,7 @@ async def apply_withdrawal(db, user, amount, channel, account_name, account_no):
     try:
         bound_name = (decrypt_field(dist.real_name, strict=True, field="real_name") or "").strip()
     except Exception as e:
-        logger.critical(f"[提现风控] 绑定实名解密失败，已拒绝本次提现 distributor_id={dist.id}: {e}")
+        logger.critical(f"[提现风控] 绑定实名解密失败，已拒绝该次提现 distributor_id={dist.id}: {e}")
         return False, "提现实名校验失败，请联系客服处理", None
     risk_note = ""
     if not bound_name:
@@ -883,8 +879,8 @@ async def audit_withdrawal(db, withdrawal_id, action, auditor, remark=None, refu
     # MySQL 下 row_lock 已把同一提现单串行化，本条 UPDATE 是双保险；SQLite 下它是唯一护栏。
     new_status = "paid" if action == "paid" else "rejected"
     # 审核人没填备注时必须保留申请时写入的备注（尤其实名风控备注）：直接写 None 会在
-    # 点下「确认已打款」的瞬间销毁「本笔需人工核验实名」这条风控留痕，事后既无法证明这笔
-    # 为什么走了人工核验，也无法在纠纷中说明平台尽到了核验义务。
+    # 点下「确认已打款」时销毁「本笔需人工核验实名」的留痕，事后无法证明该笔提现
+    # 经过人工核验，也无法在纠纷中说明平台尽到了核验义务。
     values = {"status": new_status, "audited_at": datetime.now(), "auditor": auditor,
               "remark": (remark or wd.remark)}
     if action == "rejected":

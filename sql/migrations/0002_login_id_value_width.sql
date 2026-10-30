@@ -5,7 +5,7 @@
 -- MySQL 严格模式下超宽不是截断而是报错（1406 Data too long），故障表现为：
 --   · 用 65+ 位邮箱注册/登录 → 写 users.last_login_value 时 500（账号已建、会话没发）；
 --   · 该账号随后下单 → 写 orders.login_id_value 时 500（下单必失败）。
--- 设备码/openid 均 ≤64，只有邮箱会越界，所以此前只在长邮箱账号上可复现。
+-- 设备码/openid 均 ≤64，只有邮箱会越界，所以目前只在长邮箱账号上可复现。
 --
 -- 用法（只在存量库上执行一次；全新库直接由 init.sql 建表，不要跑本文件）：
 --   docker compose exec -T mysql mysql -u"$DB_USER" -p"$DB_PASSWORD" "$DB_NAME" \

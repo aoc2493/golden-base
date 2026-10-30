@@ -102,9 +102,5 @@ async def set_password(db: AsyncSession, target: str, new_password: str) -> None
 
 
 async def hash_user_password(new_password: str) -> str:
-    """Hash a normal-user password off the event loop.
-
-    User login accepts the iteration count embedded in the stored hash, so the
-    credential module's PBKDF2 format is mutually compatible with auth.py.
-    """
+    """在线程池中计算普通用户密码摘要。"""
     return await asyncio.to_thread(_hash_password, new_password)

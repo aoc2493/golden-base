@@ -9,7 +9,7 @@ from app.core.database import Base
 # 只用 server_default=func.now() 时时间戳由数据库生成：SQLite 的 CURRENT_TIMESTAMP
 # 恒为 UTC，MySQL 的 NOW() 取会话时区；而全库业务代码统一用 datetime.now()（本地时间）
 # 做比较。基准一旦不一致（开发/测试的 SQLite 必然差 8 小时），所有「DB 时间戳 vs 本地
-# 时间」的判据就会恒真或恒假。探针实测后果（UTC+8 环境）：
+# 时间」的判据就会恒真或恒假。一旦发生这种漂移（UTC+8 环境）：
 #   · scheduler.close_expired_orders —— 刚下单 0 秒的 pending 订单被判超时置 expired，
 #     前端轮询到 expired 直接抛「订单已关闭」：用户付了钱却被告知订单没了，极易重复
 #     下单重复付款（支付回调仍能把 expired 激活为 completed，钱不会丢，但体验与
@@ -37,16 +37,9 @@ class User(Base):
     password_hash = Column(String(255), nullable=True, comment="密码摘要，格式 pbkdf2_sha256$迭代$盐$摘要")
     auth_version = Column(Integer, default=0, nullable=False,
                           comment="认证版本；改密/重置后递增以撤销全部旧会话")
-    phone = Column(String(20), nullable=True)
     nickname = Column(String(50), nullable=True)
     avatar_url = Column(String(500), nullable=True)
     status = Column(SmallInteger, default=1, comment="1正常 2已注销")
-    # 账号持有人自报的公历出生日期，仅用于年龄门槛（未成年人禁充值）。
-    # 存公历而不存历法类型：声明只收公历，农历自报年龄无法向监管复现。
-    # 与业务档案里的 birth_date 不是一回事：后者是「解读对象」（可能是他人、可能是未成年人）。
-    # 注销时随其他个人信息一并置空，声明行为本身由 compliance_consents 留痕保留。
-    declared_birth_date = Column(String(20), nullable=True, comment="自报公历出生日期（年龄门槛）")
-    age_declared_at = Column(DateTime, nullable=True, comment="成年声明时点")
     inviter_id = Column(BigInteger, nullable=True, comment="一级邀请人，仅绑定一次")
     invited_at = Column(DateTime, nullable=True)
     # 双向定位：内部自增 ID 与登录标识两个维度共同钉死用户唯一性。
@@ -216,7 +209,7 @@ class MembershipLedger(Base):
     order_id = Column(BigInteger, nullable=False)
     order_no = Column(String(32), nullable=False)
     level = Column(String(20), nullable=False, comment="month/year/lifetime")
-    grant_days = Column(Integer, default=0, comment="本次发放天数，永久为0")
+    grant_days = Column(Integer, default=0, comment="该次发放天数，永久为0")
     action = Column(String(20), default="grant", comment="grant发放/rollback回滚/upgrade升级")
     created_at = Column(DateTime, default=datetime.now, server_default=func.now())
 
@@ -249,13 +242,12 @@ class Report(Base):
     status = Column(String(20), default="generating", comment="generating/completed/failed/refunded")
     # AI 生成合成内容标识元数据（见 utils/ai_mark.build_ai_meta）。
     # 必须落库而不是每次响应时现算：标识是「生成时」的事实（哪次生成、哪个模型、
-    # 哪几章出自大模型），事后无从复现；且历史报告在本次改动之前生成，现算会把它们
-    # 一律标成当前口径，与事实不符。接口下发时由 ai_mark.label_payload 展平，
+    # 哪几章出自大模型），事后无从复现。接口下发时由 ai_mark.label_payload 展平，
     # 元数据缺失的老报告按「算法生成」兜底——宁可标注偏保守，也不出现无标识的页面。
     ai_meta = Column(JSON, nullable=True)
     viewed_at = Column(DateTime, nullable=True)
     retry_count = Column(SmallInteger, default=0)
-    # 软删除（档案页「解读历史」隐藏）；订单/财务不受影响，收藏保留
+    # 软删除（报告历史隐藏）；订单/财务不受影响，收藏保留
     deleted_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.now, server_default=func.now())
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now,
@@ -265,7 +257,7 @@ class Report(Base):
 class AiGenerationLog(Base):
     """生成合成内容的日志留存表（《标识办法》第十一条：不少于六个月）。
 
-    存摘要而不存原文：提示词与生成内容里含用户姓名、出生信息等个人信息，原文全量留存
+    存摘要而不存原文：生成内容可能包含个人信息，原文全量留存
     400 天等于把敏感数据另存一份，与《个人信息保护法》最小必要原则冲突；而监管核查
     与侵权举证需要的是「什么时间、哪个模型、为谁、生成了哪条内容」这条可追溯链路，
     摘要（prompt_digest）已足以用同一输入复现比对。
@@ -363,12 +355,7 @@ class SystemConfig(Base):
 
 
 class PasswordResetTicket(Base):
-    """Durable password-reset request and one-time code state.
-
-    The public request endpoint must always return the same response so it
-    cannot enumerate accounts.  Only an existing active account gets a row;
-    codes are stored as keyed SHA-256 digests, never in plaintext.
-    """
+    """持久化密码重置工单与一次性验证码状态。"""
     __tablename__ = "password_reset_tickets"
     __table_args__ = (
         Index("ix_password_reset_email_status", "email", "status"),
@@ -413,7 +400,6 @@ class Distributor(Base):
     next_level = Column(SmallInteger, nullable=True, comment="待生效等级（满足晋升条件、等次日0点生效）")
     next_level_at = Column(DateTime, nullable=True, comment="待生效等级的生效时刻=达标次日0点")
     level_updated_at = Column(DateTime, nullable=True, comment="最近一次等级变更时点")
-    exam_passed = Column(SmallInteger, default=0, comment="是否通过合规入门考试（0未过/1已过）")
     consent_signed_at = Column(DateTime, nullable=True, comment="《合规推广承诺书》签署时点")
     # 提现实名 AES-256-GCM 加密落库（见 utils/crypto_field.py）。
     # 列宽按「接口允许的最坏明文」实测密文长度定，而不是按字符数估：字段不限字符集，
@@ -544,34 +530,6 @@ class MonthlyPerformance(Base):
     __table_args__ = (UniqueConstraint("distributor_id", "month", name="uq_perf_dist_month"),)
 
 
-class ExamQuestion(Base):
-    """第七条：合规入门考试题库（内容为第十章宣传红线）。满分100、每题按 score 计分。"""
-    __tablename__ = "exam_questions"
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
-    category = Column(String(50), nullable=True, comment="所属红线类别，如效果承诺/恐吓诱导/绝对化用语")
-    content = Column(Text, nullable=False, comment="题干")
-    options = Column(JSON, nullable=True, comment="选项数组")
-    answer = Column(String(20), nullable=False, comment="正确答案（单选存选项标识，多选存逗号分隔）")
-    qtype = Column(String(10), default="single", comment="single单选/multiple多选/judge判断")
-    score = Column(Integer, default=5, comment="本题分值")
-    sort_order = Column(Integer, default=0)
-    enabled = Column(SmallInteger, default=1)
-    created_at = Column(DateTime, default=datetime.now, server_default=func.now())
-
-
-class ExamRecord(Base):
-    """第七条/第五十九条：考试记录，留痕不少于3年。不限次数直至通过；违规重考两次未过保持冻结。"""
-    __tablename__ = "exam_records"
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
-    user_id = Column(BigInteger, nullable=False, index=True)
-    distributor_id = Column(BigInteger, nullable=True, index=True)
-    score = Column(Integer, default=0)
-    passed = Column(SmallInteger, default=0, comment="1=达到及格分(80)")
-    answers = Column(JSON, nullable=True, comment="作答快照")
-    attempt_no = Column(Integer, default=1, comment="第几次尝试")
-    created_at = Column(DateTime, default=datetime.now, server_default=func.now())
-
-
 class ComplianceConsent(Base):
     """第十二、五十六、五十九条：合规留痕（不少于3年）。
     doc_type: promoter_commitment=《合规推广承诺书》 / payment_disclaimer=支付前免责勾选 / rule_change=规则重大不利变更单独确认。
@@ -592,7 +550,7 @@ class ComplianceConsent(Base):
 class ComplianceAssessment(Base):
     """上线风险项的合规评估记录与意见留存。
 
-    整改代码之外为什么还要单独一张表：代码只能证明「改了」，证明不了「为什么这么改、
+    合规评估需要独立记录：代码只能证明「改了」，证明不了「为何这样改、
     依据哪一条、谁在何时评估过、结论是已整改还是风险可接受」。行政检查与纠纷中被要求
     出示的正是后者——一份能追溯到具体法条、具体措施、具体责任人与下次复核时点的书面意见。
 
@@ -632,39 +590,6 @@ class SensitiveWord(Base):
     created_at = Column(DateTime, default=datetime.now, server_default=func.now())
 
 
-class ExternalAccount(Base):
-    """第五十条：外部推广账号报备。status 0待审/1通过/2拒绝；拒不报备按中度及以上违规。"""
-    __tablename__ = "external_accounts"
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
-    distributor_id = Column(BigInteger, nullable=False, index=True)
-    user_id = Column(BigInteger, nullable=False)
-    platform = Column(String(30), nullable=False, comment="抖音/快手/小红书/视频号/公众号/B站/微博等")
-    account_name = Column(String(100), nullable=False)
-    account_url = Column(String(255), nullable=True)
-    status = Column(SmallInteger, default=0, comment="0待审/1通过/2拒绝")
-    remark = Column(String(200), nullable=True)
-    created_at = Column(DateTime, default=datetime.now, server_default=func.now())
-    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, server_default=func.now())
-
-
-class ReportTicket(Base):
-    """第五十八条：用户举报工单，24小时内响应核查反馈。status 0待处理/1处理中/2已处置/3已驳回。"""
-    __tablename__ = "report_tickets"
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
-    reporter_id = Column(BigInteger, nullable=True, index=True, comment="举报人，可匿名")
-    target_distributor_id = Column(BigInteger, nullable=True, index=True)
-    target_type = Column(String(30), nullable=True, comment="distributor/content/order")
-    content = Column(Text, nullable=False, comment="举报内容")
-    evidence = Column(JSON, nullable=True, comment="证据（图片URL/链接/截图）")
-    contact = Column(String(100), nullable=True, comment="举报人联系方式")
-    status = Column(SmallInteger, default=0, comment="0待处理/1处理中/2已处置/3已驳回")
-    handler = Column(String(50), nullable=True)
-    handle_result = Column(String(500), nullable=True)
-    responded_at = Column(DateTime, nullable=True, comment="首次响应时点（24h内）")
-    created_at = Column(DateTime, default=datetime.now, server_default=func.now())
-    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, server_default=func.now())
-
-
 class ViolationRecord(Base):
     """第五十九/六十条：违规分级处置记录（留痕不少于3年，平台免责证据链）。
     level: minor轻度/moderate中度/severe重度/illegal涉嫌违法。一条记录=一次处置。"""
@@ -677,11 +602,10 @@ class ViolationRecord(Base):
     reason = Column(String(500), nullable=True, comment="判定情形（对应第六十条具体条款）")
     evidence = Column(JSON, nullable=True, comment="固定证据（截图/链接/举报ID/巡检记录）")
     order_id = Column(BigInteger, nullable=True, comment="涉违规订单（扣该订单佣金）")
-    report_ticket_id = Column(BigInteger, nullable=True, comment="关联举报工单")
-    frozen_until = Column(DateTime, nullable=True, comment="本次冻结到期时点（中度7天）")
+    frozen_until = Column(DateTime, nullable=True, comment="该次冻结到期时点（中度7天）")
     level_before = Column(SmallInteger, nullable=True, comment="降级前等级")
     level_after = Column(SmallInteger, nullable=True, comment="降级后等级")
-    clawback_amount = Column(DECIMAL(12, 2), default=0, comment="本次扣除/追回金额")
+    clawback_amount = Column(DECIMAL(12, 2), default=0, comment="该次扣除/追回金额")
     handler = Column(String(50), nullable=True, comment="处置人（admin/system）")
     status = Column(String(20), default="applied", comment="applied已处置/revoked已撤销（申诉成功）")
     created_at = Column(DateTime, default=datetime.now, server_default=func.now())
@@ -754,18 +678,7 @@ class InvoiceRequest(Base):
                         server_default=func.now())
 
 
-# ============================================================
-# 卡券模块（渠道批发卡密）—— 接入该业务 H5 前端时新增
-#
-# 只新增卡券自身必需的两张表；Order / UserMembership / UserEntitlement /
-# MembershipLedger 等**一律复用本文件已有的模型**，不另定义 ——
-# 独立卡券系统自带的那几套同名模型与本库口径不兼容：
-#   · user_memberships 的 bonus_quota / bonus_used / continuous_flag 为 NOT NULL，
-#     独立版模型缺列 → 写入直接 1364；
-#   · 会员流水本库是单数 membership_ledger，独立版是复数 membership_ledgers；
-#   · user_entitlements 本库 feature varchar(20)、biz_key varchar(64)、order_id NOT NULL。
-# 详见 app/core/services/card.py 顶部说明。
-# ============================================================
+# 卡券批次与卡密复用订单、会员和权益模型，不重复定义财务实体。
 
 
 class CardBatch(Base):

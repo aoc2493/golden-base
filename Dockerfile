@@ -11,7 +11,7 @@ WORKDIR /app
 ARG APT_MIRROR=mirrors.aliyun.com
 ARG PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
 
-# T1：容器时区固定为东八区，避免 datetime.now() 偏差 8 小时
+# 容器时区固定为东八区，避免 datetime.now() 偏差 8 小时
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
@@ -19,7 +19,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     TZ=Asia/Shanghai
 
-# 系统依赖 + 时区数据（N8：创建非 root 用户，不以 root 运行）
+# 系统依赖、时区数据与非 root 运行用户
 # python:3.12-slim 基于 Debian 12(bookworm)，源写在 deb822 格式的
 # /etc/apt/sources.list.d/debian.sources；更早的基础镜像用 /etc/apt/sources.list。
 RUN set -eux; \
@@ -41,7 +41,7 @@ COPY requirements.txt .
 # 索引已由上面的 PIP_INDEX_URL 指向清华源，此处不再重复指定
 RUN pip install --no-cache-dir -r requirements.txt
 
-# P3（#66 镜像加固）：构建期依赖（gcc/MySQL 客户端头/pkg-config）在 pip 装完后即无用——
+# 构建期依赖（gcc/MySQL 客户端头/pkg-config）在 pip 装完后即无用——
 # requirements 里 cryptography/Pillow/ephem/pycryptodomex 均走 cp312 预编译轮子，aiomysql 为纯 Python，
 # 运行期不需要编译器。留在运行镜像里等于给攻击者留下就地编译 exploit 的工具链，装完即 purge。
 # 放在 pip install 之后：若真有包缺轮子需要现场编译，编译失败会先在本步之前暴露，不会静默带病上线。
@@ -55,10 +55,9 @@ USER appuser
 
 EXPOSE 8000
 
-# L3（审计修复）：容器僵死/未监听端口时 docker 自动重启。
+# 容器僵死/未监听端口时 docker 自动重启。
 # 用 python urllib 探 /health，无需引入 curl（保持镜像精简）。
-# 退出码即健康判据：urllib 抛异常时 python 自身以非 0 退出，无需再追加 `|| exit 1`
-# （原写法在 shell form 下与不加完全等价，是死代码）。
+# 退出码即健康判据：urllib 抛异常时 python 自身以非 0 退出，无需追加 `|| exit 1`。
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
     CMD python -c "import urllib.request,sys; r=urllib.request.urlopen('http://127.0.0.1:8000/health',timeout=3); sys.exit(0 if r.status==200 else 1)"
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

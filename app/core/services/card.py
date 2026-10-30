@@ -1,37 +1,7 @@
-"""卡券（渠道批发卡密）服务 —— 接入算法类 H5 前端的版本
+"""卡券兑换、会员/权益发放与购买凭证管理。
 
-================= 接入时必须知道的三个关键点 =================
-
-【一】本模块不定义任何业务模型，只新增 card_batches / card_codes 两张纯卡券表。
-独立卡券系统自带 Order / UserMembership / MembershipLedger / UserEntitlement /
-MembershipUsage 五个模型，与 H5 库里已有的同名表**口径不兼容**，直接并入会炸：
-  · user_memberships：H5 的 bonus_quota / bonus_used / continuous_flag 是 NOT NULL，
-    独立版模型没有这几列 → INSERT 直接 1364 缺列，会员根本发不出去；
-  · 会员流水表名：独立版是复数 membership_ledgers，H5 是单数 membership_ledger
-    → 流水分裂成两张表，日后回滚权益时找不到 grant 流水；
-  · user_entitlements：独立版 feature varchar(40) / biz_key varchar(128)，
-    H5 是 varchar(20) / varchar(64)，且 H5 的 order_id 为 NOT NULL；
-  · 会员额度：独立版自建 membership_usages 计数，H5 是以 orders 表
-    pay_channel='member' 的 0 元单计数（services/quota.py）→ 必然双算或漏算。
-所以这里：单次卡 → entitlement.grant_entitlement；会员卡 → membership.grant_membership；
-额度完全交给 H5 现有 quota.py。**卡券模块只负责「把权益发出去」，不接管消耗。**
-
-【二】biz_key 延迟绑定 —— 这是接入最核心的一处冲突
-H5 的单次权益是「一份业务结果一把钥匙」：check_feature 的查询条件是 `biz_key = ?`，
-而 SQL 里 `NULL = 'x'` 恒为 UNKNOWN，所以以 biz_key=NULL 发放的权益**永远命中不了**。
-可卡券天然是「先兑换、后选业务结果」，兑换那一刻不可能知道 biz_key。
-若照搬独立版直接发 NULL：用户兑完卡会发现所有业务结果都打不开 —— 付款后无交付。
-本模块的做法：兑换时以 biz_key=None 发放（pending 状态），由
-entitlement.check_feature 在用户第一次真正打开某份业务结果时就地 CAS 绑定
-（仅 biz_key IS NULL 时生效，并发下只有一条能绑成功），
-绑定后与「当场购买」的权益完全等价，且一份业务结果只绑一次。
-
-【三】不接入独立版的「核销」模型
-独立版有 POST /feature/consume 把权益置为 used。H5 的 check_feature 只认
-status='available'，一旦核销，用户再看自己**已生成的报告**都会被拒；
-H5 的「一次性」语义是靠 biz_key 绑定 + 订单复用（插件的 _find_reusable_*）实现的，
-根本不需要核销。强行接入等于让用户花钱后看不到自己买过的报告，故本模块
-不提供 consume，消耗逻辑完全沿用 H5。
+卡券兑换先生成 0 元订单，再调用统一的会员或权益服务发放能力。单次卡的
+业务键可延迟绑定；卡券模块不直接维护消费次数。
 """
 import logging
 import secrets
@@ -89,7 +59,7 @@ REDEEM_DAILY_MAX = 20
 class CardRedeemError(Exception):
     """可预期的兑换失败。
 
-    persist=True 表示「本次失败同时需要保留一处状态变更」（过期卡自动作废）。
+    persist=True 表示「该次失败同时需要保留一处状态变更」（过期卡自动作废）。
     路由层据此选择 commit 而不是 rollback —— 否则作废会被回滚掉，
     过期卡长期停留在 unused 并被导出到渠道继续售卖。
     """
@@ -126,7 +96,7 @@ def _gen_one_code() -> str:
     """生成单张卡密。
 
     必须用 secrets（密码学随机）而非 random：卡密本身就是可直接兑换的资产，
-    可预测的伪随机序列等于送给攻击者一把遍历钥匙（独立版用的就是 secrets，此处保持）。
+    可预测的伪随机序列等于送给攻击者一把遍历钥匙。
     """
     return _format_code("".join(secrets.choice(_CODE_ALPHABET)
                                 for _ in range(_CODE_LEN)))
@@ -135,9 +105,7 @@ def _gen_one_code() -> str:
 def _gen_no(prefix: str) -> str:
     """单号：前缀 + 秒级时间 + 密码学随机后缀。
 
-    独立版是「微秒字符串截断到 17 位（精度仅 10ms）+ 6 位数字随机」，
-    批量生码时同 10ms 内会撞 orders.order_no / card_batches.batch_no 唯一约束；
-    改用 token_hex(4) 后碰撞概率可忽略，同时保持时间序可读。
+    使用密码学随机后缀，避免批量生码时撞订单号或批次号唯一约束。
     """
     return f"{prefix}{datetime.now().strftime('%y%m%d%H%M%S')}{secrets.token_hex(4).upper()}"
 
@@ -145,8 +113,7 @@ def _gen_no(prefix: str) -> str:
 async def _gen_unique_codes(db: AsyncSession, count: int) -> list:
     """生成 count 个库内不冲突的卡密。
 
-    一次 IN 批量查重：独立版逐个 candidate 打一条 SELECT，count=5000 时
-    会向数据库打 5000 条查询。card_codes.uk_code 唯一约束仍是最终兜底。
+    一次 IN 批量查重；card_codes.uk_code 唯一约束作为最终保证。
     """
     picked: set = set()
     rounds = 0
@@ -169,9 +136,7 @@ async def _gen_unique_codes(db: AsyncSession, count: int) -> list:
 async def load_sku_index(db: AsyncSession) -> dict:
     """SKU -> Product（仅上架商品）。
 
-    独立卡券系统把 CARD_CATALOG 写死在 catalog.py 里，是一套与前端商品不一致的
-    SKU 口径（易与 products 表漂移）。这里改为直接读 products 表：
-    前端卖什么，卡券就能发什么，杜绝口径漂移。
+    直接读取 products 表，使可售商品与卡券目录使用同一 SKU 来源。
     """
     rows = (await db.execute(
         select(Product).where(Product.enabled == 1))).scalars().all()
@@ -257,7 +222,7 @@ async def disable_code(db: AsyncSession, code_id: int) -> CardCode:
     已使用的卡不可作废：那等于从用户手里单方面收回已购资产，需要独立的
     「权益收回」运营流程，不能在这里静默改状态糊过去。
 
-    【为什么不用 db.get 后改属性】
+    【不使用 db.get 后改属性的原因】
     db.get 是普通读取，不加行锁，与 redeem 的 `SELECT ... FOR UPDATE` 并发时会交错：
     作废读到 status=unused → 兑换抢到锁、置 used、发权益并提交 → 作废随后拿内存里
     那份**过期**的 ORM 状态覆盖写回 disabled。结果是用户已拿到权益，卡却记为
@@ -321,7 +286,7 @@ async def redeem(db: AsyncSession, raw_code: str, user_id: int) -> dict:
     card = (await db.execute(
         row_lock(select(CardCode).where(CardCode.code == code))
     )).scalar_one_or_none()
-    # 以下失败分支对外文案统一为「卡券无效」。原来的
+    # 以下失败分支对外文案统一为「卡券无效」。当前的
     # 细分文案（不存在/已兑换/已失效/已过期）等于向探测者免费提供状态 oracle：
     # 拿到部分泄露码的攻击者无需真正兑换即可零成本探明每张码的当前状态，
     # 进而筛出「unused=值得尝试、used=原码可能被渠道复投」的目标。卡密空间
@@ -335,8 +300,7 @@ async def redeem(db: AsyncSession, raw_code: str, user_id: int) -> dict:
     if card.status == CARD_STATUS_USED:
         logger.warning(f"[兑换拒绝] 已兑换 user={user_id} code={mask_code(code)}")
         raise CardRedeemError(INVALID_CODE_MSG)
-    # 白名单判定：只有 unused 可兑换。独立版是黑名单（仅拦 used/disabled），
-    # 任何新增或异常状态值都会被当成可用卡直接发放权益。
+    # 白名单判定：只有 unused 可兑换。
     if card.status != CARD_STATUS_UNUSED:
         logger.warning(f"[兑换拒绝] 状态异常 status={card.status} "
                        f"user={user_id} code={mask_code(code)}")
@@ -388,8 +352,7 @@ async def redeem(db: AsyncSession, raw_code: str, user_id: int) -> dict:
     tp_expire = None
     tp_stacked = False
     if prod.product_type == "membership":
-        # 复用 H5 的会员发放：自动处理新购/续费/升级、写 membership_ledger 流水、
-        # 重置本期额度。独立版自建的那套会因 NOT NULL 缺列直接失败。
+        # 复用统一会员发放：自动处理新购、续费、升级并写会员流水。
         await membership_svc.grant_membership(
             db, user_id, prod.sku_code, order_no=order.order_no, order_id=order.id)
     elif prod.product_type == "timepass":
@@ -402,8 +365,8 @@ async def redeem(db: AsyncSession, raw_code: str, user_id: int) -> dict:
         # 先提交，用户凭空丢掉一张卡的时长 —— 故对命中的那一行加行锁。
         base_expire = await ent_svc.max_timepass_expire(db, user_id, now=now, for_update=True)
         tp_stacked = base_expire > now
-        # 首兑与顺延都落一条**属于本单**的
-        # 独立权益行。原实现顺延只改旧行，而旧行写死挂在**另一张卡的订单**上：
+        # 首兑与顺延都落一条**属于本单**的独立权益行。若顺延只修改既有行，
+        # 而该行挂在另一张卡的订单上：
         #   ① 本兑换单名下没有任何权益行 → ent_svc.revoke_by_order(本单) 收不回，
         #      客服与审计也无法按订单核对这张卡究竟给了多少时长；
         #   ② 那张旧单一旦被回收，会连带收走后来叠加的全部时长（误伤后续兑换）；
@@ -437,7 +400,7 @@ async def redeem(db: AsyncSession, raw_code: str, user_id: int) -> dict:
     tip = None
     if tp_expire:
         tip = ("畅用时长已累加，" if tp_stacked else "畅用已开通，") + \
-              f"{tp_expire.strftime('%m-%d %H:%M')} 前全站解读不限次使用"
+              f"{tp_expire.strftime('%m-%d %H:%M')} 前全站能力不限次使用"
     elif feature:
         # 会员有效期内兑换单次卡：权益不会作废，只是当期用不上（check_feature 会员直接放行）。
         # 明确告知，避免用户以为卡白买了。
@@ -464,9 +427,8 @@ async def my_cards(db: AsyncSession, user_id: int, page: int = 1,
                    page_size: int = 20) -> dict:
     """我的卡券（已兑换记录，卡密脱敏），分页返回。
 
-    原实现写死 `limit=50` 并把「本页条数」当作 total 返回：一次兑 50 张以上的
-    批发型用户看不到更早的记录，前端按 total 分页时也会因 total 恒等于本页条数
-    而永远只有一页 —— 用户会认为卡券凭空丢失。
+    必须返回真实总数，不能把「本页条数」当作 total；否则一次兑换超过一页的
+    批发型用户看不到更早记录，前端也会误判只有一页。
     这里返回真实总数，由路由层限制 page_size 上限。
     """
     page = max(int(page or 1), 1)
@@ -501,7 +463,7 @@ async def my_cards(db: AsyncSession, user_id: int, page: int = 1,
 async def auto_issue_for_order(db: AsyncSession, order) -> Optional[CardCode]:
     """支付订单履约时自动生成对应档位的卡券，生成即自动使用（付款=买卡）。
 
-    业务口径：站内所有真实付费（会员/单次解读）一律以卡券为权益凭证——用户在 H5
+    站内真实付费（会员/单次报告）一律以卡券为权益凭证。
     付款成功后，系统即时生成一张对应 SKU 的卡券并立即自动使用（status 直接落
     used，used_by / redeem_order_no 回指支付订单），用户全程无感知。
     权益/会员的发放仍由 fulfillment.fulfill_paid_order 的既有分支完成，本函数只补
@@ -513,9 +475,9 @@ async def auto_issue_for_order(db: AsyncSession, order) -> Optional[CardCode]:
     """
     if not order or not order.order_no or not order.sku_code:
         return None
-    # 仅真实付费单发卡，判定与四条退款路径的 has_real_payment 完全统一：卡券兑换单（0 元权益载体）、会员免费解读单、历史 0 元/无资金渠道单
-    # 都不是购买行为，再发一张等于凭空造资产。原实现手写渠道黑名单（card/member），
-    # 漏掉金额<=0 等无真实资金流入的订单，且与退款资格口径漂移。
+    # 仅真实付费单发卡：卡券兑换单、会员免费报告单与历史 0 元单均不重复发卡。
+    # 都不是购买行为，再发一张等于凭空造资产。统一用 has_real_payment 判断，
+    # 避免渠道黑名单与退款资格口径漂移。
     if not has_real_payment(order):
         return None
     # 仅 single / membership 参与支付自动发卡；时长卡（timepass）按运营裁定只能

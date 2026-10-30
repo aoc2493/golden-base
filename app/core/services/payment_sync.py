@@ -1,10 +1,9 @@
 """支付主动查单与掉单补偿。
 
-背景：履约原本只有一条路径——等支付平台的异步回调（api/payment.py 的 wechat/alipay notify）。
-回调会因网络闪断、服务发布重启、平台重试耗尽而全部丢失；此时用户已扣款，而订单永久停在
-pending/expired，会员与权益永不发放。这是纯回调架构的固有缺口，行业内称「掉单」，
-成熟支付系统的标准做法是三层兜底：异步回调 + 前端触发查单 + 定时对账/查单。本模块补上后两层
-的查单部分（对账见 services/reconcile.py）。
+支付平台的异步回调可能因网络闪断、服务发布重启、平台重试耗尽而丢失；此时用户
+已扣款，而订单可能停在 pending/expired，会员与权益无法发放。支付系统采用三层兜底：
+异步回调 + 前端触发查单 + 定时对账/查单。本模块实现后两层中的查单部分
+（对账见 services/reconcile.py）。
 
 设计要点：
 1. 复用 api.payment._mark_order_paid（CAS 抢占履约权 + 金额校验 + 报告触发），绝不另写一套
@@ -38,7 +37,7 @@ async def sync_one_order(db: AsyncSession, order: Order, source: str = "schedule
                          background_tasks=None) -> dict:
     """对单个订单主动查单；渠道确认已收款则补履约。返回处置结果供调用方统计与告警。
 
-    action 取值：fulfilled（本次补履约成功）/ already（此前已履约，幂等）/ noop（渠道未支付）
+    action 取值：fulfilled（该次补履约成功）/ already（目前已履约，幂等）/ noop（渠道未支付）
                 / retry_later（渠道没答清，下轮再问）/ skip（渠道不可用或订单不可补偿）
                 / amount_mismatch（渠道金额与订单不符，已拒绝履约，需人工核查）
 

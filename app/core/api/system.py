@@ -24,7 +24,7 @@ _INTERNAL_KEYS: set = set()
 
 
 # ============ 能力位 ============
-# 站点多处入口的可用性取决于运行期是否接了外部通道，此前前端一律照常展示：
+# 站点多处入口的可用性取决于运行期是否接了外部通道，目前前端一律照常展示：
 #   · 注册页摆「验证码 *」+「发送验证码」，但邮件未接入 —— 点一下就把该邮箱的
 #     注册通道堵死 10 分钟（验证码落了 Redis 却永远收不到）；
 #   · 支付入口照常展示，但商户凭据未配 —— 填完点下去才被告知「暂未开通」。
@@ -81,10 +81,9 @@ async def get_public_config(db: AsyncSession = Depends(get_db)):
     # 与 sql/init.sql 的 theme 种子保持同一套配色：两处不一致会让「空库启动」
     # 与「按 init.sql 初始化」呈现不同主题，排障时很容易误判成前端缓存问题。
     public.setdefault("theme", {"primary_color": "#3B82F6", "accent_color": "#2563EB", "danger_color": "#e64340"})
-    # announcement / vip_benefits 虽在 _PUBLIC_KEYS 白名单内，但 system_configs 表里
-    # 一直没有这两行，实测 /system/config 从不返回它们：首页公告永远不弹，会员权益文案
-    # 只能吃前端硬编码的 fallbackVipBenefits（改文案要发版）。补上与前端一致的默认值，
-    # 运营往表里写入同名键即可覆盖，前端兜底保留但不再是唯一来源。
+    # announcement / vip_benefits 在 _PUBLIC_KEYS 白名单内，同时补上与前端一致的
+    # 默认值，避免 system_configs 缺行时首页公告不弹、会员权益只能使用硬编码文案。
+    # 运营往表里写入同名键即可覆盖。
     public.setdefault("announcement", "")
     public.setdefault("vip_benefits", registry.default_vip_benefits())
     _apply_capability_bits(public)
@@ -95,8 +94,7 @@ async def get_public_config(db: AsyncSession = Depends(get_db)):
 async def get_internal_config(db: AsyncSession = Depends(get_db),
                               user: User = Depends(get_current_user)):
     """登录后配置：与公开接口同样只返回白名单内的非敏感项。
-    原实现直接返回整张 system_configs 表，绕过了上面的键白名单：
-    任意登录用户（注册零门槛，设备码即可拿到 token）就能读到后续新增的任何内部项，
+    不能直接返回整张 system_configs 表：任意登录用户就能读到后续新增的内部项，
     例如佣金比例、提现门槛、结算周期、客服话术等运营参数（改价/刷佣的前置情报）。
     全仓前后端均无任何调用方依赖本接口的“全量”语义，收紧为零风险。
     如后续确有仅登录可见的配置需求，请往 _INTERNAL_KEYS 里逐项显式登记，不要改回全量返回。"""

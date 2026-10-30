@@ -45,7 +45,7 @@ pytest                              # SQLite
 DB_TYPE=mysql pytest                # 需要一台可连的 MySQL，或直接用 CI
 ```
 
-真实教训：MySQL 作业曾在 `NOT NULL constraint failed: users.id` 上翻红，
+注意事项：MySQL 作业曾在 `NOT NULL constraint failed: users.id` 上翻红，
 原因就是用例里硬编码了 SQLite 引擎，本地永远看不到那个分支。
 
 ## 提交信息
@@ -63,7 +63,7 @@ docs: clarify PAYMENT_MOCK scope
 - core 零业务词：能力码、SKU、价格、文案不写死在 `app/core/`
 - 价格只信后端：前端只传「买什么」，不传金额
 - 不做破坏式改动时优先保持接口与表结构兼容
-- 注释只解释「为什么」，不复述代码在做什么
+- 注释只解释「原因」，不复述代码在做什么
 
 ## 安全
 

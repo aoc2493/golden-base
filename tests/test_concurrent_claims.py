@@ -1,14 +1,9 @@
-"""并发重复投递的资金链路：状态流转必须用「带条件的原子 UPDATE」抢占权利。
+"""并发重复投递的资金链路必须用「带条件的原子 UPDATE」抢占权利。
 
-这两条用例证明的是同一类缺陷：注释与文档都写了「幂等/并发安全」，但幂等闸读的是
-本 session 内存里的旧值。回调重复投递时两条链路各自的 session 都读到「未履约/未退款」，
-双双穿过内存闸 → 会员天数二次顺延、佣金二次冲回、权益二次发放。
-
-写法说明（为什么不是 asyncio.gather）：真实并发要 MySQL 行锁才复现得干净，本地没有 MySQL
-时退化成文件库——缺陷的充分条件不是「同时执行」，而是「B 拿着陈旧的内存判定进入 CAS 之前的那步 SELECT」——
-所以这里显式造出陈旧状态：B 先读到订单/退款单，然后结束自己的事务（expire_on_commit=False
-让实例保留刚读到的值），A 完成并提交，B 再执行。若实现只用内存闸，B 必然二次履约/二次回收；
-用条件 UPDATE 抢占，B 的 WHERE 不再匹配 → rowcount=0 → 幂等返回。
+测试显式构造两个会话先后读到旧状态的情形：B 先读到订单/退款单，
+结束事务后保留 ORM 实例（expire_on_commit=False），A 完成并提交，B 再执行。
+条件 UPDATE 的 WHERE 不再匹配时 rowcount=0，调用方应幂等返回，避免二次履约、
+二次回收、会员天数二次顺延或佣金二次冲回。
 CI 的 MySQL 作业会把同一个用例打到真实 MySQL 上（见 factory fixture 按 DB_TYPE 选方言）。
 """
 from datetime import datetime
@@ -56,7 +51,7 @@ async def factory(tmp_path):
 
 
 async def _seed_order(s):
-    user = User(phone="13900000041", nickname="并发者")
+    user = User(nickname="并发者")
     s.add(user)
     await s.flush()
     order = Order(order_no="CC-PAY-1", user_id=user.id, sku_code="vip_month",
@@ -111,7 +106,7 @@ async def test_second_refund_success_does_not_reclaim_again(factory, monkeypatch
     monkeypatch.setattr(refund_state, "revoke_refunded_order", fake_revoke)
 
     async with factory() as loser, factory() as winner, factory() as seed:
-        user = User(phone="13900000042", nickname="退款并发")
+        user = User(nickname="退款并发")
         seed.add(user)
         await seed.flush()
         order = Order(order_no="CC-RF-1", user_id=user.id, sku_code="demo_echo",
@@ -158,7 +153,7 @@ async def test_two_refund_rows_on_one_order_reclaim_only_once(factory, monkeypat
     monkeypatch.setattr(refund_state, "revoke_refunded_order", fake_revoke)
 
     async with factory() as s1, factory() as s2, factory() as seed:
-        user = User(phone="13900000043", nickname="双退款单")
+        user = User(nickname="双退款单")
         seed.add(user)
         await seed.flush()
         order = Order(order_no="CC-RF-2", user_id=user.id, sku_code="demo_echo",

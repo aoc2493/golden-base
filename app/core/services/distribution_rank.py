@@ -164,9 +164,7 @@ async def settle_month(db: AsyncSession, month: str) -> dict:
     才允许入账（阶梯差额补发 + 排行榜奖金），避免重复发钱。"""
     perfs = (await db.execute(row_lock(select(MonthlyPerformance).where(
         MonthlyPerformance.month == month, MonthlyPerformance.settled == 0)))).scalars().all()
-    # Ranking must be computed from the same locked snapshot as the money
-    # movements. Computing it before the lock lets a concurrent refund change
-    # the totals between rank calculation and settlement.
+    # 排名与资金变更必须使用同一加锁快照，避免退款在计算与入账之间改变总额。
     rank_map = await compute_ranking(db, month)
     now = datetime.now()
     count = 0
@@ -201,7 +199,7 @@ async def settle_month(db: AsyncSession, month: str) -> dict:
 
 async def clawback_distributor_month(db: AsyncSession, dist_id: int, month: str) -> Decimal:
     """第三十四条第5款：结算后订单退款导致不再达档位/名次门槛，按最终业绩重核追回多发部分。
-    仅重核本推广员（不重新排名他人）；返回本次追回净额（<=0 表示扣回，0 表示无变化）。"""
+    仅重核本推广员（不重新排名他人）；返回该次追回净额（<=0 表示扣回，0 表示无变化）。"""
     mp = (await db.execute(row_lock(select(MonthlyPerformance).where(
         MonthlyPerformance.distributor_id == dist_id,
         MonthlyPerformance.month == month)))).scalar_one_or_none()
@@ -230,7 +228,7 @@ async def clawback_distributor_month(db: AsyncSession, dist_id: int, month: str)
 
 
 async def disqualify_month(db: AsyncSession, dist_id: int, month: str) -> Decimal:
-    """第六十条中度/重度：取消当月排行榜与阶梯奖励资格。返回本次追回净额(<=0)。
+    """第六十条中度/重度：取消当月排行榜与阶梯奖励资格。返回该次追回净额(<=0)。
     - 未结算月：仅标记 disqualified=1，次月8号结算时自然不计阶梯/排行；
     - 已结算月：把阶梯上浮清零重算（追回差额）+ 扣回排行奖金。
     已追回的奖励不补发（第六十条末：中度及以上被取消的当月奖励解冻后不补发）。"""

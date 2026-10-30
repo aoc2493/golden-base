@@ -14,12 +14,9 @@ CREATE TABLE IF NOT EXISTS `users` (
   `email`               VARCHAR(255) DEFAULT NULL COMMENT '邮箱（Web 站注册登录）',
   `password_hash`       VARCHAR(255) DEFAULT NULL COMMENT '密码摘要 pbkdf2_sha256$迭代$盐$摘要',
   `auth_version`        INT          NOT NULL DEFAULT 0 COMMENT '改密后递增，撤销旧会话',
-  `phone`               VARCHAR(20)  DEFAULT NULL,
   `nickname`            VARCHAR(50)  DEFAULT NULL,
   `avatar_url`          VARCHAR(500) DEFAULT NULL,
   `status`              SMALLINT     DEFAULT 1 COMMENT '1正常 2已注销',
-  `declared_birth_date` VARCHAR(20)  DEFAULT NULL COMMENT '自报公历出生日期（年龄门槛）',
-  `age_declared_at`     DATETIME     DEFAULT NULL COMMENT '成年声明时点',
   `inviter_id`          BIGINT UNSIGNED DEFAULT NULL COMMENT '一级邀请人，仅绑定一次',
   `invited_at`          DATETIME     DEFAULT NULL,
   `last_login_type`     VARCHAR(16)  DEFAULT NULL COMMENT '最近登录标识类型 device/oa_openid/mp_openid/unionid',
@@ -150,7 +147,7 @@ CREATE TABLE IF NOT EXISTS `membership_ledger` (
   `order_id`   BIGINT UNSIGNED NOT NULL,
   `order_no`   VARCHAR(32) NOT NULL,
   `level`      VARCHAR(20) NOT NULL COMMENT 'month/year/lifetime',
-  `grant_days` INT NOT NULL DEFAULT 0 COMMENT '本次发放天数，永久为0',
+  `grant_days` INT NOT NULL DEFAULT 0 COMMENT '该次发放天数，永久为0',
   `action`     VARCHAR(20) DEFAULT 'grant' COMMENT 'grant发放/rollback回滚/upgrade升级',
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   INDEX `ix_membership_ledger_user_id` (`user_id`)
@@ -312,7 +309,6 @@ CREATE TABLE IF NOT EXISTS `distributors` (
   `next_level`           SMALLINT DEFAULT NULL COMMENT '待生效等级',
   `next_level_at`        DATETIME DEFAULT NULL,
   `level_updated_at`     DATETIME DEFAULT NULL,
-  `exam_passed`          SMALLINT DEFAULT 0 COMMENT '是否通过合规入门考试',
   `consent_signed_at`    DATETIME DEFAULT NULL COMMENT '合规推广承诺书签署时点',
   `real_name`            VARCHAR(512) DEFAULT NULL COMMENT '提现实名（密文，宽度见 0005 迁移）',
   `frozen_until`         DATETIME DEFAULT NULL COMMENT '违规冻结到期时点',
@@ -433,34 +429,6 @@ CREATE TABLE IF NOT EXISTS `monthly_performances` (
   INDEX `ix_monthly_performances_distributor_id` (`distributor_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='月度业绩';
 
--- ===== 合规入门考试题库 =====
-CREATE TABLE IF NOT EXISTS `exam_questions` (
-  `id`         BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-  `category`   VARCHAR(50) DEFAULT NULL COMMENT '所属红线类别',
-  `content`    TEXT NOT NULL COMMENT '题干',
-  `options`    JSON DEFAULT NULL COMMENT '选项数组',
-  `answer`     VARCHAR(20) NOT NULL COMMENT '正确答案',
-  `qtype`      VARCHAR(10) DEFAULT 'single' COMMENT 'single/multiple/judge',
-  `score`      INT DEFAULT 5,
-  `sort_order` INT DEFAULT 0,
-  `enabled`    SMALLINT DEFAULT 1,
-  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='合规入门考试题库';
-
--- ===== 考试记录 =====
-CREATE TABLE IF NOT EXISTS `exam_records` (
-  `id`             BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-  `user_id`        BIGINT UNSIGNED NOT NULL,
-  `distributor_id` BIGINT UNSIGNED DEFAULT NULL,
-  `score`          INT DEFAULT 0,
-  `passed`         SMALLINT DEFAULT 0 COMMENT '1=达到及格分',
-  `answers`        JSON DEFAULT NULL,
-  `attempt_no`     INT DEFAULT 1,
-  `created_at`     DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  INDEX `ix_exam_records_user_id` (`user_id`),
-  INDEX `ix_exam_records_distributor_id` (`distributor_id`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='考试记录（留痕≥3年）';
-
 -- ===== 合规留痕 =====
 CREATE TABLE IF NOT EXISTS `compliance_consents` (
   `id`             BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
@@ -510,40 +478,6 @@ CREATE TABLE IF NOT EXISTS `sensitive_words` (
   UNIQUE KEY `uk_word` (`word`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='敏感词库';
 
--- ===== 外部推广账号报备 =====
-CREATE TABLE IF NOT EXISTS `external_accounts` (
-  `id`             BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-  `distributor_id` BIGINT UNSIGNED NOT NULL,
-  `user_id`        BIGINT UNSIGNED NOT NULL,
-  `platform`       VARCHAR(30) NOT NULL COMMENT '抖音/快手/小红书/视频号/公众号/B站/微博等',
-  `account_name`   VARCHAR(100) NOT NULL,
-  `account_url`    VARCHAR(255) DEFAULT NULL,
-  `status`         SMALLINT DEFAULT 0 COMMENT '0待审/1通过/2拒绝',
-  `remark`         VARCHAR(200) DEFAULT NULL,
-  `created_at`     DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  `updated_at`     DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  INDEX `ix_external_accounts_distributor_id` (`distributor_id`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='外部推广账号报备';
-
--- ===== 举报工单 =====
-CREATE TABLE IF NOT EXISTS `report_tickets` (
-  `id`                   BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-  `reporter_id`          BIGINT UNSIGNED DEFAULT NULL COMMENT '举报人，可匿名',
-  `target_distributor_id` BIGINT UNSIGNED DEFAULT NULL,
-  `target_type`          VARCHAR(30) DEFAULT NULL COMMENT 'distributor/content/order',
-  `content`              TEXT NOT NULL,
-  `evidence`             JSON DEFAULT NULL,
-  `contact`              VARCHAR(100) DEFAULT NULL,
-  `status`               SMALLINT DEFAULT 0 COMMENT '0待处理/1处理中/2已处置/3已驳回',
-  `handler`              VARCHAR(50) DEFAULT NULL,
-  `handle_result`        VARCHAR(500) DEFAULT NULL,
-  `responded_at`         DATETIME DEFAULT NULL,
-  `created_at`           DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  `updated_at`           DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  INDEX `ix_report_tickets_reporter_id` (`reporter_id`),
-  INDEX `ix_report_tickets_target_distributor_id` (`target_distributor_id`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='举报工单';
-
 -- ===== 违规分级处置记录 =====
 CREATE TABLE IF NOT EXISTS `violation_records` (
   `id`               BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
@@ -554,7 +488,6 @@ CREATE TABLE IF NOT EXISTS `violation_records` (
   `reason`           VARCHAR(500) DEFAULT NULL,
   `evidence`         JSON DEFAULT NULL,
   `order_id`         BIGINT UNSIGNED DEFAULT NULL,
-  `report_ticket_id` BIGINT UNSIGNED DEFAULT NULL,
   `frozen_until`     DATETIME DEFAULT NULL,
   `level_before`     SMALLINT DEFAULT NULL,
   `level_after`      SMALLINT DEFAULT NULL,

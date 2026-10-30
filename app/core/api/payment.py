@@ -1,12 +1,7 @@
 """支付路由：支付方式查询 + 微信/支付宝异步回调。
 
-曾有的缺陷（已修复）：本文件早期是占位实现——只把订单置为 completed，既不写
-paid_at/pay_trade_no，也不调用 fulfill_paid_order，更没有对接任何支付平台的异步回调路由。
-那时「用户付了钱」与「发放会员/权益/计佣」两段完全断开：付款后 membership 仍是非会员、
-订单 paid_at=None，且因 pay_trade_no 为空被退款判据（api/order.py 的
-_self_refund_block）拦成「无实际支付金额，无需退款」，fulfill_paid_order 从未被调用过。
-
-现为完整闭环，回调入口共用同一个幂等的 _mark_order_paid（成功后调用 fulfill_paid_order）：
+支付回调与主动查单构成完整的履约闭环，入口共用同一个幂等的
+_mark_order_paid（成功后调用 fulfill_paid_order）：
   · wechat/notify   —— 微信支付 V3 异步回调（验签解密→履约，含退款回调）；
   · alipay/notify   —— 支付宝异步回调（RSA2 验签→履约）。
 主动查单兜底见 services/payment_sync.py；回调与查单最终都收口到 _mark_order_paid。
@@ -151,9 +146,8 @@ async def wechat_notify(request: Request, background_tasks: BackgroundTasks,
     幂等/并发：验签后经条件 UPDATE 抢履约权，WHERE status 为非终态才翻转，
     rowcount=1 才履约、并发落败方幂等回执（见 _mark_order_paid）。"""
     # 验签前的报文体硬上限。微信回调明文不足 10KB，64KB 已是十余倍冗余。
-    # 先按 Content-Length 预检——原实现 await request.body() 把整个 body 读进内存后才判大小，
-    # 攻击者发一个全局上限（8MB）以内、但远超 64KB 的 body 就能让回调白白缓冲整包再拒绝；预检超限
-    # 直接 413，一个字节都不读。chunked 无 Content-Length 时由下方 len(body) 兜底（全局流式中间件已限 8MB）。
+    # 先按 Content-Length 预检，超限直接 413，不把本可提前拒绝的报文缓冲进内存。
+    # chunked 无 Content-Length 时由下方 len(body) 兜底（全局流式中间件已限 8MB）。
     _cl = request.headers.get("content-length")
     if _cl and _cl.isdigit() and int(_cl) > 64 * 1024:
         logger.warning(f"微信回调 Content-Length 超限已拒绝 cl={_cl}")

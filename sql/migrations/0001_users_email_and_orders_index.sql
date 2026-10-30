@@ -1,10 +1,10 @@
 -- ============================================================
--- 0001：存量库补齐 users.email / users.password_hash、orders 与举报/违规表索引
+-- 0001：存量库补齐 users.email / users.password_hash、orders 与违规表索引
 --
--- 背景：init.sql 的 users 表此前缺少这两列，而 ORM（app/core/models.py）里有。
+-- 背景：init.sql 的 users 表目前缺少这两列，而 ORM（app/core/models.py）里有。
 -- 由 init.sql 建出的库在启动后不会报错，但任何 select(User)/insert(User) 都会
 -- 抛 1054 Unknown column —— 登录、注册及所有鉴权接口全部 500。
--- 另补齐两个仅 ORM 声明的查询索引（举报按被举报人、违规记录按用户），缺了不报错，
+-- 另补齐仅 ORM 声明的查询索引（违规记录按用户），缺了不报错，
 -- 但后台按这两列过滤时会走全表扫描。
 --
 -- 用法（只在存量库上执行一次；全新库直接由 init.sql 建表，不要跑本文件）：
@@ -53,15 +53,6 @@ SET @exists := (SELECT COUNT(*) FROM information_schema.STATISTICS
                 WHERE TABLE_SCHEMA = @db AND TABLE_NAME = 'orders' AND INDEX_NAME = 'ix_orders_status_created');
 SET @ddl := IF(@exists = 0,
   'ALTER TABLE `orders` ADD INDEX `ix_orders_status_created` (`status`, `created_at`)',
-  'DO 0');
-PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
-
--- report_tickets.target_distributor_id：后台按「被举报推广员」筛选
-SET @exists := (SELECT COUNT(*) FROM information_schema.STATISTICS
-                WHERE TABLE_SCHEMA = @db AND TABLE_NAME = 'report_tickets'
-                  AND INDEX_NAME = 'ix_report_tickets_target_distributor_id');
-SET @ddl := IF(@exists = 0,
-  'ALTER TABLE `report_tickets` ADD INDEX `ix_report_tickets_target_distributor_id` (`target_distributor_id`)',
   'DO 0');
 PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 

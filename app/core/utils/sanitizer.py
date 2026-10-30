@@ -33,7 +33,7 @@ _SENSITIVE_KEY_NAMES = re.compile(
 # 原正则只匹配关键词本身、不捕获等号后的值：
 # 对 "password=hunter2" 匹配到的只有 "password"，替换结果是
 # "password=******=hunter2"——真实口令原样保留，脱敏形同虚设。
-# 现在把「关键词 + 分隔符 + 值」整体捕获替换，值不再外泄。
+# 把「关键词 + 分隔符 + 值」整体捕获替换，避免值外泄。
 _SENSITIVE_KEY_VALUES = re.compile(
     r"(password|passwd|secret|token|key|signature|signature_value|cookie|session|authorization|pwd|app_secret|appsecret)"
     r"(\s*[=:]\s*)([^\s,;&'\"]+)",

@@ -1,25 +1,7 @@
-"""AI 生成合成内容标识（显式标识 + 隐式标识 + 留存元数据）。
+"""AI 生成内容标识与留存元数据。
 
-法规依据：《人工智能生成合成内容标识办法》（2025 年 9 月 1 日施行）与强制性国标
-GB 45438-2025《网络安全技术 人工智能生成合成内容标识方法》。三项义务缺一不可：
-  · 显式标识——在呈现给用户的界面上以可感知方式提示「AI 生成」（第四条）；
-  · 隐式标识——在内容元数据中写入内容属性、服务提供者名称或编码、内容编号等（第五条、
-    GB 45438 表 1/表 2 的 Label、ContentProducer、ProduceID、ContentPropagator、PropagateID）；
-  · 日志留存——生成合成内容的日志信息留存不少于六个月（第十一条），见 models.AiGenerationLog。
-
-为什么集中到一个模块：标识文案与元数据字段一旦散落在各渲染器、各接口里，必然漏。
-接入方常见做法是只在个别页面写上「由 AI 生成」，同一份内容里其余同样出自大模型的
-章节却没有标识——分散实现就会漏标。现在元数据在生成时一次性构造（由插件在生成/交付
-钩子中调用 build_ai_meta），随内容落库，接口用 label_payload 展平下发，前端只认这一个
-字段渲染标识条，新增内容形态不会再漏。
-
-本模块只构造/解释标识数据：不碰数据库、不发网络请求，可被工具层与服务层安全复用。
-
-【接线状态·读代码前必看】底座不生成任何内容，因此本模块在 app/ 下暂无调用点：
-reports.ai_meta 从未被写入、AiGenerationLog 只有清理任务（tasks/scheduler.py 的到期删除）
-而没有写入任务。接入方一旦让插件调用模型产内容，就必须补上两处：生成时
-`build_ai_meta(...)` 写入 reports.ai_meta 与 AiGenerationLog，下发时用 `label_payload(...)`
-展平给前端。只接了 demo 插件（无 AI 内容）的部署不需要配 AI_MARK_*，启动自检对此只告警。
+业务插件在生成 AI 内容时调用 ``build_ai_meta``，落库到 ``reports.ai_meta`` 与
+``AiGenerationLog``；响应下发时调用 ``label_payload`` 生成显式标识字段。
 """
 import hashlib
 import json
@@ -62,7 +44,7 @@ def new_content_id(scene: str) -> str:
 def prompt_digest(text) -> str:
     """提示词/输入摘要（sha256 截 32 位），生成日志留存用。
 
-    不留原文：提示词里含用户填写的姓名、出生信息等个人信息，全量留存等于把敏感数据复制一份
+    不留原文：提示词里可能含用户提供的个人信息，全量留存等于复制敏感数据。
     进日志表并保留 400 天，与个保法的最小必要原则冲突。摘要足以证明「这次生成用过这份输入」
     （需要复现时用同一输入重算比对即可），也满足「留存可追溯」的监管要求。
     """
@@ -83,7 +65,7 @@ def build_ai_meta(*, scene: str, ai: bool, content_id: Optional[str] = None,
     ai=True：内容由生成式 AI（大模型）产出，承担《标识办法》全部义务；
     ai=False：内容由第三方算法计算产出，不属生成式 AI，但仍按同一格式标注「算法生成」，
               避免用户误认为真人撰写——标注从严不会违规，标注缺失才会。
-    chapters：AI 参与生成的章节序号（如报告首章为大模型解读、其余为算法原话时传 [0]），
+    chapters：AI 参与生成的章节序号（例如仅首页由模型生成时传 [0]）。
               让标识能精确到章节而不是笼统覆盖全文。
     """
     ts = generated_at or datetime.now()
@@ -112,7 +94,7 @@ def build_ai_meta(*, scene: str, ai: bool, content_id: Optional[str] = None,
 def label_payload(meta, *, generated_at: Optional[str] = None) -> dict:
     """接口下发用：把落库元数据整理成前端渲染显式标识所需的扁平字段。
 
-    元数据缺失（本次改动之前生成的历史报告）时按「算法生成」兜底，而不是不标识：
+    元数据缺失的存量报告按「算法生成」兜底，而不是不标识：
     历史报告同样是自动生成的内容，宁可标注偏保守，也不能出现无任何标识的页面。
     """
     m = meta if isinstance(meta, dict) else {}

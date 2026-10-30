@@ -1,10 +1,4 @@
-"""分销路由：推广中心（状态/佣金/提现/团队/规则）。
-
-前端 Api 调用面与后端路由此前完全脱节（前端调 /status|commissions|withdrawals|
-withdraw|team|rules，后端只有无人调用的 /info），推广中心/提现/佣金/团队/规则
-五个页面全部 404/数据加载失败。服务层（services/distribution.py）已完整，
-本文件按前端契约全部接线。
-"""
+"""分销路由：推广中心（状态/佣金/提现/团队/规则）。"""
 import logging
 import re
 from datetime import datetime
@@ -122,7 +116,7 @@ async def distributor_status(request: Request, user: User = Depends(get_current_
     }
     base_url = (settings.H5_BASE_URL or "").rstrip("/")
     if not base_url:
-        # 兜底用本次请求的 Host 拼站点域名：H5_BASE_URL 是最容易漏配的一项
+        # 兜底用该次请求的 Host 拼站点域名：H5_BASE_URL 是最容易漏配的一项
         # （.env.example 里有、线上 .env 里没有），一旦为空，推广中心只显示
         # 「邀请链接未配置」，整条邀请归因链路直接失效。nginx 已下发 Host 与
         # 但 Host 是客户端可控头，无条件采信等于 Host 头注入：攻击者发
@@ -338,9 +332,8 @@ async def dist_rules(user: User = Depends(get_current_user),
                      db: AsyncSession = Depends(get_db)):
     """推广规则完整文案（共 11 项：模式/等级/晋升/计佣/阶梯/排行/结算/归因/提现/纳税/合规）。
 
-    原实现只硬编码返回 5 个字段，遗漏了等级/晋升/阶梯/排行/结算/归因等核心规则，
-    且与 SQL seed 的完整 distribution_rules 配置脱节。现改为以 settings 为权威来源
-    逐项构建完整 11 字段（数值与实际生效规则一致），system_configs.distribution_rules
+    以 settings 为权威来源逐项构建完整 11 字段（数值与实际生效规则一致），
+    system_configs.distribution_rules
     可按键覆盖（运营自定义）。sections 为按固定顺序的展示数组。
 
     本接口只负责「规则全文」，不负责「变更公示」：公示条与确认留痕在 /status

@@ -50,7 +50,7 @@ _REGISTER_WINDOW = 600
 # 不限流即可离线穷举爆破，命中他人设备码就直接接管其账号
 _LOGIN_LIMIT = 20
 _LOGIN_WINDOW = 600
-# A single account must not be brute-forced from a botnet with one IP per guess.
+# 单账号并发尝试上限，防止攻击者轮换 IP 暴力破解。
 _ACCOUNT_LOGIN_LIMIT = 10
 # 设备码格式强校验——h5- + 至少 20 位字母数字（主路径为 CSPRNG 生成的 32 位 hex，
 # 存量弱熵用户设备码为 base36 亦可匹配），总长不超过 VARCHAR(64)。
@@ -99,12 +99,9 @@ def _state_payload(raw: str) -> str:
 def sign_state(raw: str) -> str:
     """state 加 HMAC 签名，防篡改邀请码/回跳路径。
 
-    超长时只能裁 payload，绝不能裁签名：原实现由 build_authorize_url 把签好的整串
-    截到 128 字符，等于把 HMAC 尾巴砍掉，回跳后 verify_state 必然失败；而签名
-    校验成为登录硬前置后，微信内用户会直接被挡在门外（探针实测 7 个真实场景挂 3 个，
-    例如 #/report?order_no=... 这类带参数的分享链接）。
-    裁掉 payload 尾部最多让前端 parseState 解不出 p/r：回跳后落在首页、邀请码丢失
-    （邀请码前端另有 7 天 localStorage 兜底），登录本身不受影响。"""
+    超长时只能裁 payload，绝不能裁签名；截断 HMAC 会导致回跳后的 state 校验
+    必然失败。裁掉 payload 尾部最多让前端 parseState 解不出 p/r，回跳后落在
+    首页并丢失邀请码，登录本身不受影响。"""
     payload = _state_payload(raw)
     if len(payload) > _STATE_PAYLOAD_BUDGET:
         logger.warning(f"授权 state 超长，已裁剪 payload: {len(payload)} -> {_STATE_PAYLOAD_BUDGET}")
@@ -120,11 +117,8 @@ def verify_state(signed: str) -> Optional[str]:
     刻意不对 payload 做 base64 解码：sign_state 只在原文含非 URL-safe 字符时
     才编码一次，事后无法可靠区分「原文本来就是 base64url」与「我们编码过一次」，
     强行解码会把前端传来的 base64url state 解成 JSON（往返不再恒等），
-    而超长被裁剪过的 payload 又会解出不完整的 UTF-8 序列直接抛异常。
-    原实现把「签名有效但解码失败」和「签名被篡改」一并归到 except 里返回 None，
-    等于用户只是分享了一个带参数的长链接，回跳后就被判定为授权校验失败、
-    彻底登录不了（state 校验是登录硬前置）。
-    安全边界只由 HMAC 比对决定；透传内容由前端 parseState 自行解析，
+    而超长被裁剪过的 payload 又会解出不完整的 UTF-8 序列。
+    因此安全边界只由 HMAC 比对决定，透传内容由前端 parseState 自行解析；
     解不开会落到首页，邀请码另有 7 天 localStorage 兜底。
     """
     try:
@@ -161,7 +155,7 @@ async def _issue_token(db: AsyncSession, user: User, invite_code):
 # 兼容说明：哈希串里写死了当次迭代数，verify 按串内值派生，存量密码无需重置；
 # 单次派生在审计机约 0.5s；必须通过 asyncio.to_thread 执行，不能阻塞事件循环。
 _PBKDF2_ITERATIONS = 600000
-# Used to make "unknown account" and "wrong password" spend the same time.
+# 未知账号也执行一次同成本哈希，避免通过耗时判断账号是否存在。
 _DUMMY_PASSWORD_HASH = (
     "pbkdf2_sha256$600000$5402d859e7c81a800674e14c5badf769$"
     "a2112d2b30746f9934acd15730402740cd57ba083158fa5b6620721bd23b28d5"
@@ -169,7 +163,7 @@ _DUMMY_PASSWORD_HASH = (
 
 
 def _reset_code_digest(code: str) -> str:
-    """Keyed digest prevents a six-digit code from being brute-forced offline."""
+    """使用带密钥摘要，避免六位验证码在离线场景被直接穷举。"""
     key = (settings.SENSITIVE_FIELD_KEY or settings.JWT_SECRET_KEY).encode("utf-8")
     return hmac.new(key, str(code).strip().encode("utf-8"), hashlib.sha256).hexdigest()
 
@@ -199,13 +193,13 @@ async def authorize_url(request: Request, state: str = Query("", max_length=256)
     """返回微信静默授权链接；state 经后端签名。
     防登录 CSRF：签名只能证明 state 由本服务签发，不能证明是「当前用户浏览器」
     发起的——攻击者可自己调本接口拿到合法签名的 state，拼上自己微信的 code 诱骗受害者
-    打开，受害者即被登进攻击者账号。修复为 OAuth 标准的浏览器绑定（double-submit）：
+    打开，受害者即被登进攻击者账号。这里采用 OAuth 标准的浏览器绑定（double-submit）：
     下发授权链接时生成一次性 nonce 同时写入 Redis（state→nonce）与发起方 Cookie，
     回跳登录时两者必须匹配，且登录成功即消费（DEL）防重放。"""
     if not oauth_configured():
         return error(ErrorCode.PARAM_ERROR, "微信网页授权未配置")
-    # 匿名端点此前无限流，每次调用都写一个一次性 Redis 键（state 可任意变化），
-    # 构成写入放大器。与 wechat-login 同口径加 IP 级限流（30 次/分钟，真人足够）。
+    # 匿名端点每次调用都写一个一次性 Redis 键（state 可任意变化），需要 IP 级
+    # 限流避免写入放大；30 次/分钟对正常登录足够。
     if not await redis_rate_limit(
             redis_client, f"rate:authurl_ip:{get_client_ip(request)}", 30, 60):
         return error(ErrorCode.RATE_LIMIT, "操作过于频繁，请稍后再试")
@@ -231,16 +225,16 @@ async def authorize_url(request: Request, state: str = Query("", max_length=256)
 @router.post("/wechat-login")
 async def wechat_login(req: WechatLoginRequest, request: Request, db: AsyncSession = Depends(get_db)):
     """微信静默授权登录"""
-    # 本接口会触发对微信 code2session 的外部调用（放大器），此前无任何限流。
-    # IP 级 30 次/分钟：正常单用户一次登录只打 1-2 次，阈值宽松不影响真人。
+    # 本接口会触发对微信 code2session 的外部调用，需要 IP 级限流；
+    # 正常单用户一次登录只调用 1-2 次，30 次/分钟不影响真实用户。
     allowed = await redis_rate_limit(
         redis_client, f"rate:wxlogin_ip:{get_client_ip(request)}", 30, 60)
     if not allowed:
         return error(ErrorCode.RATE_LIMIT, "操作过于频繁，请稍后再试")
     # state 必须存在且签名有效，否则不予登录。
-    # 原实现验签失败只打 warning 仍继续登录，构成 OAuth 登录 CSRF：
+    # 验签失败必须终止登录，否则会构成 OAuth 登录 CSRF：
     # 攻击者用自己的微信 code 拼出回跳链接诱骗受害者打开，受害者浏览器就会登录到
-    # 攻击者账号，其随后填写的出生信息档案、支付与报告全部落入攻击者账号可被读取。
+    # 攻击者账号，其随后填写的业务数据、支付与报告都会被攻击者读取。
     # 正常流程必然携带签名 state（authorize-url 下发 → 微信原样回传），强制校验不影响真实用户。
     if not req.state:
         return error(ErrorCode.PARAM_ERROR, "微信授权已失效，请关闭页面重新从入口进入")
@@ -299,7 +293,7 @@ async def wechat_login(req: WechatLoginRequest, request: Request, db: AsyncSessi
         # 同一 openid 的并发回调（回跳页刷新/双击）会同时查不到用户并各自 INSERT，
         # oa_openid 唯一约束让后到者抛 IntegrityError → 500，用户只看到「登录失败」。
         # 用 SAVEPOINT 包住 INSERT：撞约束就改读已存在的那条，且不污染外层事务
-        # （否则 get_db 退出时的 commit 会连带失败，本次请求彻底发不出 token）。
+        # （否则 get_db 退出时的 commit 会连带失败，该次请求彻底发不出 token）。
         # 与 services/membership.py 的行锁获取、插件的报告创建同一套路。
         try:
             async with db.begin_nested():
@@ -348,8 +342,8 @@ async def login(req: LoginRequest, request: Request, db: AsyncSession = Depends(
     # 设备码格式强校验（h5- + ≥20 位字母数字），封堵低熵值穷举
     if not _DEVICE_CODE_RE.match(device_code):
         return error(ErrorCode.PARAM_ERROR, "设备码格式错误")
-    # 命中已存在用户也必须限流：原实现只对“新建用户”走 _register_allowed，
-    # 意味着攻击者可无限次穷举他人设备码，一旦命中即拿到其 token 完成账号接管。
+    # 命中已存在用户也必须限流；若只限制新建用户，攻击者可无限次穷举他人
+    # 设备码，一旦命中即拿到其 token 完成账号接管。
     if not await redis_rate_limit(redis_client, f"login_limit:{get_client_ip(request)}",
                                   _LOGIN_LIMIT, _LOGIN_WINDOW):
         return error(ErrorCode.RATE_LIMIT, "操作过于频繁，请稍后再试")
@@ -450,16 +444,16 @@ async def logout(request: Request,
                  db: AsyncSession = Depends(get_db),
                  user: User = Depends(get_current_user)):
     """退出登录——拉黑当前 token（不影响其他设备）+ 清除 httpOnly Cookie。
-    退出登录原先误用用户级黑名单（会把该用户全部设备一并登出）；
-    且 Cookie 会话（无 Bearer 头）时读不到 token、什么都没拉黑。现从请求头或 Cookie 取当前 token。
+    退出登录只撤销当前会话，不能误用用户级黑名单把所有设备一并登出；
+    Cookie 会话没有 Bearer 头，因此从请求头或 Cookie 取当前 token。
 
-    撤销失败必须可感知：原实现 `except Exception: pass` 后一律回
-    「已退出登录」。共享设备上用户据此认为会话已失效，实际 token 仍可用到自然过期，
-    服务端日志连一条错误都没有。现如实回传 revoked=false 与明确文案。
+    撤销失败必须可感知：不能吞掉异常后一律回「已退出登录」。共享设备上用户
+    会误以为会话已失效，实际 token 仍可用到自然过期；失败时如实回传
+    revoked=false 与明确文案。
 
     Bearer 头与 httpOnly Cookie 可能同时存在且是**两个不同的
-    token**（例如前端走 Cookie、又用旧 token 打了 Authorization）。原实现二选一，
-    只撤销其中一个，另一个在登出后依然有效。现两个都撤销。
+    token**（例如前端走 Cookie、又用旧 token 打了 Authorization）。两个都必须撤销，
+    否则另一个在登出后依然有效。
     """
     tokens: list[str] = []
     if credentials is not None and credentials.credentials:
@@ -470,7 +464,7 @@ async def logout(request: Request,
 
     revoked = True
     if not tokens:
-        # 无任何凭证：本次请求本身靠 Cookie/头才通过鉴权，走到这里说明两者都没有，
+        # 无任何凭证：该次请求本身靠 Cookie/头才通过鉴权，走到这里说明两者都没有，
         # 也就无从撤销——不能回报「已退出登录」。
         revoked = False
         logger.warning("退出登录未携带任何凭证，无可撤销的 token uid=%s", user.id)
@@ -496,9 +490,9 @@ async def _release_device_code(user: User, db: AsyncSession) -> tuple[bool, str]
     """解绑当前账号的设备码（设备登录凭证立即失效）。
 
     设备码是外部浏览器下的长期凭证（无口令、无过期、登出不影响）。
-    此前没有任何处置手段：退出登录后该码仍指向原账号，任何人打开页面即进入；
-    若只把 users.device_code 置空，旧码又会走 /login 的「查无用户 → 新建账号」
-    分支，静默生成一个全新空账号（用户视角：订单/会员/余额全部消失）。
+    解绑必须让原凭证明确失效，不能只把 users.device_code 置空：旧码会进入
+    /login 的「查无用户 → 新建账号」分支，静默生成一个全新空账号
+    （用户视角：订单/会员/余额全部消失）。
     故解绑前先登记「该码已释放」（失败则不解绑，fail-closed），登录链路据此明确拒绝。
 
     台账 user_identities 保留原码（与订单/退款不删同一口径），保证事后可审计
@@ -577,8 +571,8 @@ async def profile_authorize_url(request: Request, user: User = Depends(get_curre
 
     同步微信资料 CSRF：与登录流程同款 double-submit 浏览器绑定——
     下发链接时生成一次性 nonce 同时写 Redis（state→nonce）与发起方 Cookie，回跳同步时
-    两者必须匹配且成功即消费。此前 state 是全站恒定值、不登记 nonce，攻击者可用自己的
-    code 诱导受害者打开链接，把攻击者微信绑到受害者账号，再走微信登录完成账号接管。"""
+    两者必须匹配且成功即消费，避免攻击者用自己的 code 诱导受害者打开链接，
+    把攻击者微信绑到受害者账号，再走微信登录完成账号接管。"""
     if not oauth_configured():
         return error(ErrorCode.PARAM_ERROR, "微信网页授权未配置")
     # 需登录态才能发起，攻击面小于匿名 authorize-url，但仍加用户级限流防 nonce 写入放大
@@ -699,10 +693,9 @@ async def _save_remote_avatar(url: str) -> Optional[str]:
 
     安全边界（SSRF 加固）：
      · 仅允许 http/https，不跟随重定向（防重定向绕过域名/IP 校验）；
-     · 解析一次、校验全部解析结果后，把连接钉死在校验过的 IP 上：
-       旧实现校验用 socket.getaddrinfo、请求却由 httpx 另行二次解析，恶意域名可用短 TTL
-       在两次解析间切换（DNS rebinding/TOCTOU）先给安全 IP、真请求时指向内网；
-       现在 https 仍按原域名做 SNI 与证书主机名校验（连接按 IP、验证按域名，不降低 TLS 强度），
+     · 解析一次、校验全部解析结果后，把连接钉死在校验过的 IP 上，避免校验和
+       实际连接分别解析造成 DNS rebinding/TOCTOU；https 仍按原域名做 SNI 与证书
+       主机名校验（连接按 IP、验证按域名，不降低 TLS 强度），
        Host 头也保持原域名；直连 IP 一律拒绝（盲 SSRF 纵深防御）。
     与 /upload/avatar 同口径校验：魔数白名单 + 像素上限 + 体积上限；
     任一环节失败返回 None（调用方保留原头像，不因头像失败回滚昵称）。"""
@@ -810,9 +803,7 @@ async def email_register(req: EmailRegisterRequest, request: Request,
         return error(ErrorCode.RATE_LIMIT, "操作过于频繁，请稍后再试")
 
     verification_required = settings.is_prod_env and settings.REQUIRE_EMAIL_VERIFICATION
-    # Production must prove ownership before the address becomes a login
-    # identifier. Development can run without SMTP; production startup refuses
-    # that configuration separately.
+    # 生产环境必须先证明邮箱所有权；开发环境可无 SMTP，生产启动会单独校验配置。
     try:
         stored_code = await redis_client.get(f"regcode:{email}")
     except Exception:
@@ -828,15 +819,14 @@ async def email_register(req: EmailRegisterRequest, request: Request,
         except Exception:
             pass
 
-    # 账号枚举：原实现回「该邮箱已注册，请直接登录」，直接把
-    # 「某邮箱是否在本站注册过」变成一次请求即可确认的信息（撞库字典先筛一遍、
-    # 骚扰/钓鱼定向）。与同文件的 /password/reset-request 同口径：命中已存在账号
+    # 账号枚举：不能回复「该邮箱已注册，请直接登录」，否则一次请求即可确认
+    # 某邮箱是否注册，便于撞库、骚扰和钓鱼定向。与 /password/reset-request 同口径：
+    # 命中已存在账号
     # 只在日志留痕，对外给中性文案。
-    # 注意：注册成功必然要下发 token，「成功/失败」本身仍可区分，彻底消除枚举需要
-    # 邮箱验证码（未接入邮件服务前做不到）——本修复消除的是「明确告知已注册」这层。
-    # 用 scalars().first() 而非 scalar_one_or_none()：uk_users_email 是后加的
-    # （sql/migrations/0001），未跑迁移的存量库上同一个邮箱可能存在多行，
-    # 命中多行会抛 MultipleResultsFound，把「注册/登录」直接变成 500。
+    # 注意：注册成功必然要下发 token，「成功/失败」本身仍可区分；这里只保证不明确
+    # 告知某邮箱已注册。
+    # 用 scalars().first() 而非 scalar_one_or_none()：未完成唯一索引迁移的存量库上
+    # 同一邮箱可能存在多行，命中多行会抛 MultipleResultsFound，把注册/登录变成 500。
     exists = (await db.execute(
         select(User.id).where(User.email == email).order_by(User.id).limit(1))).scalars().first()
     if exists:
@@ -904,11 +894,9 @@ async def email_login(req: EmailLoginRequest, request: Request,
 @router.post("/password/reset-request")
 async def password_reset_request(req: PasswordResetRequest, request: Request,
                                  db: AsyncSession = Depends(get_db)):
-    """Create a durable reset ticket and send a one-time code when SMTP exists.
+    """创建持久化重置工单，并在配置 SMTP 时发送一次性验证码。
 
-    The response is identical for existing and unknown addresses. If SMTP is
-    unavailable, the ticket remains in the database for manual support rather
-    than existing only in a rotating log line.
+    对已注册和未注册邮箱返回相同结果；SMTP 不可用时为人工处理保留工单。
     """
     email = (req.email or "").strip().lower()
     if not _EMAIL_RE.match(email):
@@ -940,8 +928,7 @@ async def password_reset_request(req: PasswordResetRequest, request: Request,
         )
         db.add(ticket)
         await db.flush()
-        # Persist the one-time code before SMTP so a successful delivery can
-        # never be followed by a process crash that erases the ticket.
+        # 先提交验证码工单，避免邮件发送成功后进程崩溃导致工单丢失。
         await db.commit()
         if delivery_available:
             try:
@@ -949,12 +936,11 @@ async def password_reset_request(req: PasswordResetRequest, request: Request,
                 ticket.delivered = 1
                 delivered = True
             except Exception as exc:
-                # Keep the durable manual ticket. Avoid logging the code or
-                # exposing provider details to an unauthenticated caller.
+                # 保留人工工单，不记录验证码，也不向匿名调用方暴露邮件服务细节。
                 logger.error("密码重置邮件发送失败 ticket_id=%s: %s",
                              ticket.id, type(exc).__name__)
         elif not settings.is_prod_env:
-            # Development-only self-service path when SMTP is unavailable.
+            # 非生产环境返回验证码，便于本地联调。
             dev_code = code
     logger.info("密码重置工单已创建 email_exists=%s delivered=%s ip=%s",
                 bool(user), delivered,
@@ -971,7 +957,7 @@ async def password_reset_request(req: PasswordResetRequest, request: Request,
 @router.post("/password/reset-confirm")
 async def password_reset_confirm(req: PasswordResetConfirmRequest, request: Request,
                                  db: AsyncSession = Depends(get_db)):
-    """Consume a one-time reset code and replace the account password."""
+    """消费一次性验证码并更新账号密码。"""
     email = (req.email or "").strip().lower()
     if not _EMAIL_RE.match(email):
         return error(ErrorCode.PARAM_ERROR, "邮箱格式不正确")
@@ -1038,7 +1024,7 @@ async def email_send_code(req: SendEmailCodeRequest, request: Request,
     if not _EMAIL_RE.match(email):
         return error(ErrorCode.PARAM_ERROR, "邮箱格式不正确")
     # 邮件通道未接入时绝不能把验证码写进 Redis。
-    # register 的口径是「此前已为该邮箱下发过验证码则必须提供且匹配」：一旦落了 regcode: 键，
+    # register 的口径是「目前已为该邮箱下发过验证码则必须提供且匹配」：一旦落了 regcode: 键，
     # 该邮箱在 10 分钟内怎么提交都只会收到「验证码无效或已过期」，而邮件永远不会到达——
     # 一个本来可用的注册流程被用户自己点一下按钮堵死，且无任何自救入口。
     # 故未接入邮件时在下发前就拒绝，不写键、不消耗限流额度。
@@ -1066,8 +1052,7 @@ async def email_send_code(req: SendEmailCodeRequest, request: Request,
     try:
         await send_verification_code(email, code)
     except Exception as e:
-        # Do not leave a code that the user never received. Clearing it also
-        # lets the user retry instead of locking the address for its TTL.
+        # 邮件未发出时删除验证码，允许用户立即重试。
         try:
             await redis_client.delete(f"regcode:{email}")
         except Exception:

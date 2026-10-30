@@ -1,4 +1,4 @@
-"""Regression coverage for the production-readiness audit fixes."""
+"""生产可用性与资金安全回归测试。"""
 from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -9,7 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-import app.core.database  # noqa: F401 - installs the SQLite BigInteger patch
+import app.core.database  # noqa: F401 - 注册 SQLite BigInteger 补丁
 from app.config import settings
 from app.core.api.common import redis_acquire_lock
 from app.core.models import Base, Order, Product, Refund, Report, User
@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 async def _register(client) -> str:
-    email = f"audit-{uuid.uuid4().hex[:10]}@example.com"
+    email = f"safety-test-{uuid.uuid4().hex[:10]}@example.com"
     resp = await client.post("/api/auth/email/register", json={
         "email": email,
         "password": "old-password-123",

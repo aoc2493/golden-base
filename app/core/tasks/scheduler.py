@@ -50,9 +50,9 @@ _LOCK_TTL = 600  # 统一 10 分钟
 async def _acquire_lock(lock_name: str, ttl_seconds: int = _LOCK_TTL) -> bool:
     """调度任务互斥锁。
 
-    Redis 故障时 fail-closed（拒绝放行）。原实现降级返回 True（视为抢到锁），
-    多 worker 部署下自动退款/退款重试/月度结算等关键任务会被同时执行两份——各向支付平台
-    发起一笔真实退款、重复发放佣金与排行榜奖金。Redis 故障时本轮直接跳过，任务在下一轮
+    Redis 故障时 fail-closed（拒绝放行）。若降级视为抢到锁，多 worker 部署下
+    自动退款/退款重试/月度结算等关键任务会被同时执行两份，各向支付平台发起真实退款、
+    重复发放佣金与排行榜奖金。Redis 故障时本轮直接跳过，任务在下一轮
     （interval/cron 周期）自然补跑；对财务类任务来说「暂时不跑」远好于「并发重复跑」。"""
     try:
         from app.core.auth import redis_client
@@ -77,7 +77,7 @@ async def clean_expired_cache():
 
 
 async def clean_expired_password_reset_tickets():
-    """Remove expired/consumed reset records after a 30-day audit window."""
+    """保留 30 天后清理已过期或已消费的密码重置记录。"""
     if not await _acquire_lock("clean_password_reset", 300):
         return
     cutoff = datetime.now() - timedelta(days=30)
@@ -128,7 +128,7 @@ async def auto_refund_failed_reports():
                     report.retry_count = 99
                     continue
                 # 本任务是 4 条退款路径中唯一**完全没有**校验资金流入的一条，
-                # 却是卡券兑换单与会员 0 元解读单都会走到的路径（两者都会建 Report）。
+                # 卡券兑换单与会员 0 元报告单都会走到本路径（两者都会建 Report）。
                 # 少了这道判断时：报告生成失败 → 本任务对一笔 0 元订单发起退款 →
                 # 模拟支付模式下 apply_refund 直接判成功 → revoke_refunded_order
                 # 撤销该订单下 available 的权益，而卡券早已 used 无法重兑，
@@ -146,9 +146,8 @@ async def auto_refund_failed_reports():
                     continue
                 # 必须用 scalars().first()：refunds.order_id 只有普通索引、没有唯一约束，
                 # 同一订单允许多条退款单（用户申请→平台失败→订单还原 completed→再次申请）。
-                # 原实现用 scalar_one_or_none()，命中两行即抛 MultipleResultsFound，
-                # 异常被外层 except 吞掉后 rollback，本轮所有失败报告的自动退款一起回滚——
-                # 用户付了钱、报告生成失败，却永远等不到自动退款。
+                # 必须使用 scalars().first()：命中两行时 scalar_one_or_none() 会抛
+                # MultipleResultsFound，外层 rollback 将连带回滚本轮所有自动退款。
                 existing = (await db.execute(select(Refund).where(
                     Refund.order_id == order.id,
                     Refund.status.in_(["pending_refund", "failed", "processing"])))).scalars().first()
@@ -172,13 +171,10 @@ async def auto_refund_failed_reports():
                                 refund_no=refund_no)
                 db.add(refund)
                 await db.flush()
-                # External money movement must never share the database
-                # transaction that first records the idempotency key. Commit
-                # the order claim and refund number before calling the channel.
+                # 外部资金调用前先提交订单抢占与退款单号，避免回滚后换号重试。
                 await db.commit()
-                # 退款单号在入库时即预生成并原样传给平台。此前调用 apply_refund 时不传
-                # refund_no，由平台内部临时生成——若进程在拿到结果前崩溃，Refund 行上就是空单号，
-                # 后续 retry_failed_refunds 重试时会再生成一个新单号，向支付平台发起第二笔真实退款。
+                # 退款单号必须在调用渠道前落库并原样传给平台；否则进程崩溃后重试会生成新单号，
+                # 并可能向支付平台发起第二笔真实退款。
                 # 预生成后，同一条退款单的任何重试路径都复用同一个 out_refund_no，
                 # 微信/支付宝对重复单号幂等返回已有结果，杜绝“同订单二次真实退款”。
                 result = await apply_refund(
@@ -239,15 +235,15 @@ async def retry_failed_refunds():
                 order = (await db.execute(select(Order).where(Order.id == refund.order_id))).scalar_one_or_none()
                 if not order:
                     continue
-                # 只重试「钱确实还没退出去」的订单。原实现不看订单状态就再调一次平台退款接口：
+                # 只重试「钱确实还没退出去」的订单，不能不看订单状态就再次调用平台退款接口。
                 # 用户自助退款失败后订单被还原为 completed，管理员随后兜底退款成功、订单已是
                 # refunded，这条遗留的 failed 退款单仍会被本任务捡起来再退一次——二次真实退款。
                 # 卡券兑换单（pay_channel='card'）不存在真实资金流，任何退款单都是误建；
                 # 一旦重试成功同样会触发 revoke_refunded_order 撤销用户权益，而卡券已是
                 # used 无法重兑 —— 用户白丢权益。直接终结该退款单，不再打支付平台。
-                # 收紧为统一判定。原实现只认卡券单（pay_channel='card'），
-                # 漏掉了同类「无真实资金流入」的订单——最典型的是会员期内 ensure-report
-                # 产生的 0 元解读单（pay_channel='member', amount=0）。这类订单一旦遗留了
+                # 统一使用 has_real_payment 判定，覆盖所有「无真实资金流入」的订单；
+                # 最典型的是会员期内 ensure-report
+                # 产生的 0 元报告单（pay_channel='member', amount=0）。这类订单一旦遗留了
                 # failed 退款单被本任务重试成功，同样会 revoke_refunded_order 撤销用户权益，
                 # 与卡券单是同一个结局。has_real_payment 同时覆盖金额<=0 与全部无资金渠道。
                 if not has_real_payment(order):
@@ -463,9 +459,9 @@ async def sync_pending_payments():
 async def sync_processing_refunds():
     """主动向渠道核实「退款中」的退款单，把结论拉回来落库（与支付查单同范式）。
 
-    为什么必须有：退款最终结论原先只来自渠道回调，而回调会因验签配置错误、发布重启、网络
-    抖动或平台重试耗尽而永远不到达——退款单就永久停在 processing，管理员既看不到「退款
-    成功」也不敢重发，只能靠猜（本项目实际故障形态）。本任务向渠道主动查退款，确认成功的
+    主动查退款是必要的：若只依赖渠道回调，回调会因验签配置错误、发布重启、网络抖动
+    或平台重试耗尽而永远不到达，退款单会永久停在 processing，管理员既看不到「退款成功」
+    也不敢重发。本任务向渠道主动查退款，确认成功的
     走与回调完全相同的 apply_channel_refund_status（原子 CAS + 订单守卫），因此与回调并发
     到达也不会二次回收权益。锁 TTL 与调度间隔一致，Redis 故障时 fail-closed 跳过本轮，由
     后续轮次自然补跑。与 retry_failed_refunds 分工不重叠：那个只管渠道「明确不受理」的

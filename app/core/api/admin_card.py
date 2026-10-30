@@ -2,7 +2,7 @@
 
 接入要点（全部复用本底座既有的管理端安全机制，不再自建一套）：
 1) 鉴权复用 admin.require_admin：常量时间比较 + 按 IP 失败计数锁定 +
-   审计日志（admin_auth_granted / denied），比独立版「裸比较一个内置默认令牌」强得多。
+   审计日志（admin_auth_granted / denied）。
 2) 敏感操作（生码 / 作废 / 查看明文 / 导出）统一走本模块的二次密码校验，
    口径见 _operate_password_error：比 admin._check_operate_password **更严**
    （未配置密码时 fail-closed 直接禁用，而不是放行）。
@@ -54,11 +54,10 @@ _STATUS_WHITELIST = (card_svc.CARD_STATUS_UNUSED, card_svc.CARD_STATUS_USED,
 async def _admin_rate_limit(request: Request, limit: int, scope: str) -> bool:
     """管理端卡券限流。
 
-    键里必须带 scope（read / write / export）：此前读、写共用 `admin:card:{ip}` 一个桶，
-    而 redis_rate_limit 是「INCR 计数 + 与传入 limit 比较」的固定窗口，同一个键配不同
-    limit 会互相污染 —— 运营在卡密列表里连翻 21 页（读限流允许 120/分），
-    计数就到 21，紧接着点「生码」会被判 21 > 20 直接拒绝；反过来写配额也会被读请求提前吃光。
-    结果是生码/作废在运营最忙的时候随机失败，且写限流 20/分实际上形同虚设。
+    键里必须带 scope（read / write / export）。redis_rate_limit 以同一个键累计并比较
+    传入的 limit；若读、写共用一个桶，不同 limit 会互相污染：
+    运营在卡密列表里连翻 21 页（读限流允许 120/分），计数就到 21，紧接着点「生码」
+    会被判 21 > 20 直接拒绝；反过来写配额也会被读请求提前吃光。
     """
     return await redis_rate_limit(
         redis_client, f"admin:card:{scope}:{get_client_ip(request)}", limit, 60)
@@ -202,12 +201,12 @@ async def card_code_list(request: Request,
                          db: AsyncSession = Depends(get_db)):
     """卡密列表。**默认只返回脱敏码**；需明文必须通过二次密码。
 
-    【为什么不能默认给明文】
-    原实现直接返回 `code` 明文，且只要求管理令牌 —— 于是 `/export`（需要
+    【不能默认返回明文的原因】
+    明文列表不能只要求管理令牌，否则 `/export`（需要
     X-Operate-Password）的二次密码保护被同一个模块的 `/list` 完全绕过：
     凭证泄露者或越权内部人员只要把 batch_id 翻页拉完（200/页），
     就能把整批未用卡密一模一样地拖走，一次密码都不用输。
-    现在默认脱敏，传对 X-Operate-Password 才给明文，并且**明文查看本身写审计**，
+    默认脱敏，传对 X-Operate-Password 才给明文，并且**明文查看本身写审计**，
     让「谁在什么时候翻了 100 条明文卡密」有据可查。
     """
     if not is_admin:
@@ -369,8 +368,8 @@ async def card_export(batch_id: int,
 
     · 导出是「一次性拿走全部明文卡密」的动作，属最高敏感级别：必须携带二次密码
       （X-Operate-Password 请求头），且使用最严的 _LIMIT_EXPORT 限流。
-    · text 只含 unused：原实现把已兑换、已作废的码一起吐给渠道，渠道按清单重复投放，
-      用户拿到的码已被用过，凭空产生客诉与退款争议；已兑换的码对交付方也毫无用处。
+    · text 只含 unused：不能把已兑换、已作废的码一起交给渠道，否则渠道按清单
+      重复投放，用户拿到的码已被用过，产生客诉与退款争议；已兑换的码对交付方也毫无用处。
       已用/已作废的数量仍以计数形式返回，供运营核对批次账目。
     """
     if not is_admin:

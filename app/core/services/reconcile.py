@@ -190,7 +190,7 @@ async def _record_diff(db: AsyncSession, *, bill_date: str, channel: str, diff_t
                        order_no=None, channel_trade_no=None, channel_amount=None,
                        local_amount=None, channel_status=None, local_status=None,
                        detail=None) -> bool:
-    """幂等写入差错台账。返回 True 表示本次新增（False 表示此前已记录过）。
+    """幂等写入差错台账。返回 True 表示该次新增（False 表示目前已记录过）。
 
     先查后插挡不住两种重复：① 并发对账（定时任务与后台手动补跑重叠）；② 同一账单内
     同一单号产生两条同类差错（此时第二条的 select 看不到第一条尚未 flush 的 pending 行）。
@@ -346,8 +346,8 @@ async def reconcile_day(db: AsyncSession, bill_date: str) -> dict:
 
         # ---- 退款金额核对：渠道累计退款额不得超过订单实付额 ----
         # 本地 refunds 表无金额字段，故以订单维度聚合渠道账单退款额做上限核对；
-        # 超出即「多退/串单/对账口径异常」，属于资损信号（原实现只核状态不核金额，
-        # 「本地已记退款、渠道退多了」这类差错会被静默放过）。
+        # 超出即「多退/串单/对账口径异常」，属于资损信号。只核状态而不核金额会
+        # 静默放过「本地已记退款、渠道退多了」这类差错。
         if refunds:
             _order_nos = {rf.get("out_trade_no") for rf in refunds if rf.get("out_trade_no")}
             _paid_map = {}

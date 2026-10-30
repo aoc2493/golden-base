@@ -54,13 +54,7 @@ REFUND_STATUS_MAP = {'SUCCESS': 'success', 'PROCESSING': 'processing',
 class PaymentService:
     @staticmethod
     def generate_order_no() -> str:
-        """BZ + time + 48-bit cryptographic suffix.
-
-        Six decimal digits only provide 900k choices per second and become a
-        realistic unique-constraint failure at high traffic. Twelve hex chars
-        keep the identifier readable while making collisions operationally
-        negligible.
-        """
+        """生成 BZ + 时间 + 48 位密码学随机后缀的订单号。"""
         timestamp = time.strftime("%Y%m%d%H%M%S")
         rand = secrets.token_hex(6).upper()
         return f"BZ{timestamp}{rand}"
@@ -294,8 +288,7 @@ class WechatPayService(PaymentService):
             if event_type.startswith("REFUND"):
                 _amt = result.get("amount") or {}
                 # 退款金额（元，Decimal）：微信在 amount.refund 给出实际退款额、
-                # amount.total 给出原订单额。上层要拿它和订单金额轧账，所以这里必须解出来
-                # ——此前退款分支不带任何金额字段，导致回调侧的金额校验无从取值。
+                # amount.total 给出原订单额；上层据两者与本地订单金额轧账。
                 _refund_fen = _amt.get("refund")
                 _total_fen = _amt.get("total")
                 return {
@@ -335,12 +328,8 @@ class WechatPayService(PaymentService):
                 cert = serialization.load_pem_x509_certificate(raw)
                 expect = format(cert.serial_number, "x").upper()
                 return (serial or "").upper() == expect
-            # 公钥模式：公钥文件的 PUBLIC KEY ID 标识。用正则在整个文件里搜 PUB_KEY_ID_xxx，
-            # 不再只认「PUBLIC KEY ID」这一行。旧实现按行匹配该关键字，而微信官方下载件带该
-            # 注释行、纯 PEM 裁剪件（只剩 BEGIN/END）不带——后者是合法可用的凭据，旧实现却
-            # 恒返回 False，于是每一条回调都被判「serial 与所配公钥不匹配」拒收 400，
-            # 退款单永久停在 processing（本项目实际故障形态）。文件是否带一行可选注释，
-            # 不该决定资金链路是否通。
+            # 公钥模式：在整个文件中搜索 PUB_KEY_ID_xxx。微信官方下载件可能带该注释，
+            # 纯 PEM 裁剪件（只剩 BEGIN/END）则不带；文件是否含可选注释不应决定资金链路是否通。
             m = re.search(r'PUB_KEY_ID_[0-9A-Za-z]+', raw.decode(errors='replace'),
                           re.IGNORECASE)
             if not m:
@@ -394,10 +383,8 @@ class WechatPayService(PaymentService):
         """
         if not self.is_configured():
             return RefundResult("failed", msg="微信支付未配置")
-        # 退款金额不得超过订单金额（去掉 +0.01 容差，多退一分也是资损）。
-        # 原写法 `if order_amount is not None and ...`：调用方漏传订单金额
-        # 时校验被整体跳过，这条资损红线形同虚设（等价于死代码）。改为 fail-closed——
-        # 拿不到订单金额就拒绝退款，红线不依赖调用方自觉。
+        # 退款金额不得超过订单金额（不使用 +0.01 容差，多退一分也是资损）。
+        # 拿不到订单金额时必须 fail-closed，避免调用方漏传时绕过校验。
         if order_amount is None:
             logger.error("退款缺少订单金额，已拒绝（无法校验退款上限）order=%s", order_no)
             return RefundResult("failed", msg="缺少订单金额，无法校验退款上限")
@@ -411,9 +398,7 @@ class WechatPayService(PaymentService):
             "reason": reason[:80],
             "amount": {
                 "refund": _fen(amount),
-                # total 必须是原订单总额，不是本次退款额：微信会校验它等于原订单金额。
-                # 原实现两处都填 amount，全额退款时两者恰好相等而侥幸通过，
-                # 一旦支持部分退款就必然被微信驳回。
+                # total 必须是原订单总额，不是该次退款额：微信会校验它等于原订单金额。
                 "total": _fen(order_amount),
                 "currency": "CNY",
             },
@@ -647,8 +632,7 @@ class AlipayService(PaymentService):
             # 服务商/多应用共用同一把支付宝公钥时，缺少此校验会把别的 appid 的
             # 订单号当成本站订单去激活（若订单号恰好撞上则直接送权益）。
             cb_app_id = data.get("app_id")
-            # 本站已配置 app_id 时，回调必须携带且一致——原实现允许
-            # 回调缺失 app_id 即放行，等于把绑定校验留给对端自觉。
+            # 本站已配置 app_id 时，回调必须携带且一致，不能把绑定校验留给对端自觉。
             if self.app_id and str(cb_app_id or "") != self.app_id:
                 logger.warning(f"支付宝回调 app_id 缺失或不匹配，已拒收: {cb_app_id!r} != {self.app_id}")
                 return None
@@ -667,8 +651,8 @@ class AlipayService(PaymentService):
                      refund_no: Optional[str] = None, order_amount=None) -> RefundResult:
         if not self.is_configured():
             return RefundResult("failed", msg="支付宝未配置")
-        # 与微信侧同口径，去掉 +0.01 退款容差，并改为 fail-closed——
-        # 漏传订单金额时原实现直接跳过校验，退款上限形同虚设（详见微信侧同款注释）。
+        # 与微信侧同口径，不使用退款容差并保持 fail-closed；缺少订单金额时
+        # 无法校验退款上限，因此必须拒绝（详见微信侧同款注释）。
         if order_amount is None:
             logger.error("退款缺少订单金额，已拒绝（无法校验退款上限）order=%s", order_no)
             return RefundResult("failed", msg="缺少订单金额，无法校验退款上限")
@@ -861,18 +845,16 @@ async def create_payment(order_no, amount, subject, client_ip="127.0.0.1",
 # ============================================================================
 # 平台共 4 条退款路径，最终都落到下面的 apply_refund：
 #   ① api/order.py     用户自助退款       —— 经 _self_refund_block 拦截
-#   ② api/admin.py     管理员兜底退款     —— 原先只拦了卡券单
-#   ③ tasks/scheduler  auto_refund_failed_reports —— 原先什么都没拦
-#   ④ tasks/scheduler  retry_failed_refunds       —— 原先只拦了卡券单
-# 「这笔订单到底有没有真实资金流入」原先由 4 处各自手写判断，口径必然漂移，
-# ③ 就是漏掉的那一条：0 元的卡券兑换单被当成真实订单退款，apply_refund 在模拟
-# 支付模式下直接判成功，revoke_refunded_order 随即撤销用户已到账的权益 ——
-# 卡券已是 used 无法重兑，用户既没拿回钱、也永久失去已兑换的商品，无恢复路径。
-# 故收敛到本函数，任何新增退款路径都必须复用它，而不是再手写一遍判断。
+#   ② api/admin.py     管理员兜底退款
+#   ③ tasks/scheduler  auto_refund_failed_reports
+#   ④ tasks/scheduler  retry_failed_refunds
+# 「订单是否存在真实资金流入」统一由 has_real_payment 判断。若各处手写判断，
+# 0 元卡券兑换单等无资金订单可能被当成真实订单退款，并撤销用户已到账的权益。
+# 任何新增退款路径都必须复用它。
 
 # 明确无真实资金流入的渠道：
 #   · 'card'   —— 卡券兑换单（services/card.py），后台生成、凭码兑换，0 元
-#   · 'member' —— 会员期内 ensure-report 产生的 0 元解读单（插件报告端点）
+#   · 'member' —— 会员期内由插件创建报告时产生的 0 元订单
 # 将来若新增「积分兑换 / 补发订单」等同样不动账的渠道，登记到这里即可。
 NO_PAY_CHANNELS = ("card", "member")
 
@@ -925,10 +907,8 @@ async def apply_refund(order_no, pay_trade_no, amount, reason="用户申请退�
         return await wechat_pay.refund(order_no, pay_trade_no, amount, reason, **kwargs)
     r = await wechat_pay.refund(order_no, pay_trade_no, amount, reason, **kwargs)
     # 只有“微信侧明确未受理”才回退支付宝；success 与 processing 都必须原样上抛。
-    # 原实现用 r.ok（仅 status=='success' 为真）判断，导致微信返回 PROCESSING
-    # （退款极常见的正常中间态）时又向支付宝发起同一笔退款，并把支付宝的
-    # 失败结果当作最终结果 → 本地记为 failed、不撤销权益，而微信那边退款照样成功，
-    # 形成“钱退了、权益与报告还在”的真实资金损失。
+    # processing 是退款常见的正常中间态，若此时继续向支付宝发起同一笔退款，
+    # 会造成跨渠道重复退款及本地状态与实际资金流不一致。
     if r.status in ("success", "processing"):
         return r
     # 渠道回退双退款：进一步收紧回退条件——只有微信侧**确定性**未受理
@@ -967,10 +947,9 @@ async def query_payment(order_no: str, channel: Optional[str] = None) -> dict:
 async def query_refund(refund_no: str, channel: Optional[str] = None) -> dict:
     """统一主动查退款入口（与查单同范式），返回归一化结果。
 
-    为什么必须有拉取式查退款：退款结论完全依赖渠道回调送达，而回调可能因验签配置错误、
-    发布重启、网络抖动或平台重试耗尽而永远不到达。本项目实际发生过——验签配置缺陷使全部
-    回调被判 400，退款单永久停在 processing，管理员既看不到「已退款」也不敢重发，只能靠猜。
-    推送不可靠时必须有主动拉取兜底，与 query_payment 同一思路。
+    拉取式查退款用于兜底：回调可能因验签配置、发布重启、网络抖动或平台重试耗尽
+    而永远不到达。没有主动拉取时，退款单会长期停在 processing，管理员无法确认
+    渠道结论；本入口与 query_payment 使用同一思路。
     支付宝退款为同步返回（无异步中间态），无需查询；此处仅微信。
     """
     if not settings.PAY_QUERY_ENABLED:

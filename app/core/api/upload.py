@@ -29,8 +29,8 @@ def _is_real_image(content: bytes) -> bool:
 
 async def _read_limited(file: UploadFile, max_size: int):
     """分块读取并在超限处立即中止。
-    原实现 await file.read() 会先把整个请求体载入内存再判大小：Content-Length 可随意
-    声明，实际体积只受服务器 body 上限约束，并发发送大量超大文件即可直接耗尽内存。
+    不能先 file.read() 把整个请求体载入内存再判大小：Content-Length 可随意声明，
+    并发发送大量超大文件即可耗尽内存。
     这里最多多读 1 字节用于判定超限，多余部分不再进入内存。"""
     buf = bytearray()
     remaining = max_size + 1

@@ -14,18 +14,17 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 # 对象键扩展名与 ContentType 一律由真实图片格式推导，不采信用户传入的 filename。
-# 原实现直接取 filename 后缀拼进 COS 对象键，可被构造成 .html/.svg/.php 等：
-# 虽然 ContentType 固定为 image/jpeg 能缓解浏览器渲染，但对象键本身仍被污染，
-# 一旦存储桶/CDN 开启静态网站托管或按扩展名推断类型就会直接可执行。
+# 直接拼接 filename 后缀可构造 .html/.svg/.php 等对象键；当存储桶或 CDN
+# 开启静态网站托管、按扩展名推断类型时，可能造成内容执行风险。
 _EXT_BY_FORMAT = {"JPEG": "jpg", "PNG": "png", "WEBP": "webp"}
 _CT_BY_FORMAT = {"JPEG": "image/jpeg", "PNG": "image/png", "WEBP": "image/webp"}
 
 # 解压炸弹防线。上传接口的 2MB/5MB 上限约束的是「压缩后字节数」，对像素数毫无约束：
-# 实测一张 6000×6000 的纯色 PNG 压缩后只有 116.8 KB（约 3322 字节/百万像素），解码后的
+# 一张 6000×6000 的纯色 PNG 可压缩到约 116.8 KB（约 3322 字节/百万像素），解码后的
 # 像素缓冲却是 108,000,000 字节（103 MB）—— 放大 903 倍，而这里的输出目标只有
 # 200×200 / 1080×1080。也就是说「上限管的是输入，被吃掉的是输出」。
 # Pillow 自身的 MAX_IMAGE_PIXELS 默认约 8948 万：超过只发 DecompressionBombWarning（不中断），
-# 要到 2 倍即约 1.79 亿像素才抛错。按实测 2.9 MB/百万像素折算，单张图在完全静默的前提下
+# 要到 2 倍即约 1.79 亿像素才抛错。按约 2.9 MB/百万像素折算，单张图在完全静默的前提下
 # 就能吃掉约 256 MB（RGBA 约 341 MB），抛错阈值处约 512 MB。限流为 10 次/分钟/用户/IP，
 # 键里带 user.id 与 ip，多账号多 IP 可并行放大，少量并发即可耗尽内存。
 # 25M 像素（约 5000×5000，或 1080×23000 的长截图）已远超头像与反馈截图的实际需要

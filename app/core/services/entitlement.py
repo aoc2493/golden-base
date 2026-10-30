@@ -2,7 +2,7 @@
 """单次 / 按天权益服务（非会员的付费凭证）—— 通用底盘，零业务词。
 
 权益是「一份内容一把钥匙」：按能力码 feature 记账，以 biz_key 标识具体内容
-（一份计算 / 一对出生信息 / 一测算 / 一天），换内容即需再次购买。
+（一份业务结果 / 一个业务键 / 一天），换内容即需再次购买。
 
 哪些 SKU 对应哪个 feature、哪些能力是独立计费（会员不覆盖）、时长卡档位分钟数，
 全部由插件 manifest 声明、经注册表聚合；本模块只提供通用机制：
@@ -67,7 +67,7 @@ async def _bind_card_entitlement(db: AsyncSession, user_id: int, feature: str,
     `biz_key=?` 查询，NULL 永不命中。这里在首次打开时补绑。
 
     并发安全：UPDATE 带 `biz_key IS NULL` 条件（CAS），同一时刻只有一条绑成功。
-    :return: True 表示本次完成绑定，调用方据此重查。
+    :return: True 表示该次完成绑定，调用方据此重查。
     """
     if not biz_key or len(str(biz_key)) > 64:
         return False
@@ -184,19 +184,6 @@ async def check_feature(
         "source": "entitlement" if valid else "none",
         "entitlements": valid,
     }
-
-
-async def consume_entitlement(db: AsyncSession, entitlement_id: int) -> None:
-    """把单条权益置为 used（CAS：仅 available 时生效，可重复调用）。
-    供运维手工核销；当前「一份内容可重复查看」语义下主链路不核销。
-
-    【接线状态】全库无调用点（含管理端）：核销入口尚未接任何接口，改状态请走数据库工单，
-    不要以为存在某个「一键核销」的后台按钮。"""
-    await db.execute(
-        update(UserEntitlement)
-        .where(UserEntitlement.id == entitlement_id, UserEntitlement.status == "available")
-        .values(status="used", used_at=datetime.now())
-    )
 
 
 async def revoke_by_order(db: AsyncSession, order_id: int) -> int:

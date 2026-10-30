@@ -1,9 +1,9 @@
 """会员档位端到端履约回归。
 
-覆盖「钱付了、会员没到」这条最贵的路径：底座 vip_* 档位能下单、能收到回调，
-但履约要经 membership.level_of_sku 反查出档位。此前该函数只认插件
-manifest.membership_skus，而底座档位商品写死在 main._seed_base_data 里，两边一脱钩，
-grant_membership 直接抛 ValueError("非会员SKU")，订单卡在未履约、用户已扣款。
+覆盖「钱付了、会员没到」这条关键路径：底座 vip_* 档位能下单、能收到回调，
+履约要经 membership.level_of_sku 反查档位。该函数必须同时识别插件
+manifest.membership_skus 与 main._seed_base_data 写入的底座档位商品；任一侧脱钩都会
+使 grant_membership 抛 ValueError("非会员SKU")，导致订单未履约。
 
 全链路不 mock：模拟支付回调 → _mark_order_paid（CAS 抢履约权）→ fulfill_paid_order
 → grant_membership，再断言用户真的是 VIP。
@@ -57,7 +57,7 @@ async def test_seeded_membership_products_are_fulfillable(db):
 
 async def test_paid_membership_order_is_fulfilled(db):
     """月卡付款后：订单必须 completed、fulfilled_at 落库、用户成为 month 档 VIP。"""
-    user = User(phone="13900000011", nickname="会员买家")
+    user = User(nickname="会员买家")
     db.add(user)
     await db.flush()
     order = Order(order_no="VIP-1", user_id=user.id, product_name="月卡会员",
@@ -79,7 +79,7 @@ async def test_membership_tiers_differ_by_days(db):
     """年卡比月卡给的天数多：档位码若解析错档，这里会立刻暴露。"""
     users = []
     for idx, (sku, level) in enumerate((("vip_month", "month"), ("vip_year", "year"))):
-        u = User(phone=f"1390000002{idx}", nickname=f"买家{level}")
+        u = User(nickname=f"买家{level}")
         db.add(u)
         await db.flush()
         users.append(u)
@@ -101,7 +101,7 @@ async def test_membership_tiers_differ_by_days(db):
 
 async def test_duplicate_membership_callback_grants_once(db):
     """同一会员单重复回调不得二次顺延时长（幂等闸必须生效）。"""
-    user = User(phone="13900000012", nickname="重复回调买家")
+    user = User(nickname="重复回调买家")
     db.add(user)
     await db.flush()
     order = Order(order_no="VIP-2", user_id=user.id, product_name="月卡会员",

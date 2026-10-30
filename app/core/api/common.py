@@ -33,15 +33,6 @@ class ErrorCode:
     # 文案「请稍后再试」；本码是「今日次数用尽，明天再试」，前端据此弹专门的提示框，
     # 混进 1004 会让用户以为等几秒就能重试。
     QUOTA_EXCEEDED = 1006
-    # 年龄门槛与未成年人保护（services/minor_guard）。三个码分开是因为前端的应对
-    # 完全不同，归进 PARAM_ERROR 就只能弹一句「参数错误」，用户不知道下一步该做什么：
-    #   1007 需先完成成年声明 → 弹出生日期表单，提交后重放原请求；
-    #   1008 需补一项确认（监护人同意 / 他人出生信息告知）→ 弹勾选框，data.gate 区分是哪一种；
-    #   1009 终态：声明为未成年人，禁止充值，没有任何可操作项。
-    # data 里带门槛文案（后端下发，前端不另抄）：门槛文案是向用户作出的承诺，抄两份必然走偏。
-    AGE_GATE_REQUIRED = 1007
-    CONSENT_REQUIRED = 1008
-    MINOR_BLOCKED = 1009
     # 第五十七/五十八条：用户提交的 UGC（昵称/反馈等）命中一级敏感词被拦截。
     # 独立于 PARAM_ERROR：这不是参数格式错，而是内容违规，前端可据此弹合规提示并引导修改，
     # 与后台敏感词告警口径对齐。二级预警词不占用本码（放行 + 文字提示）。
@@ -75,10 +66,8 @@ class ErrorCode:
 class AdminAuthDenied(Exception):
     """管理端鉴权失败（无令牌 / 令牌错误 / 该 IP 已被锁定 / 不在 IP 白名单）。
 
-    此前 require_admin 用“返回 False”表达失败，路由体再 return error(ADMIN_LOCKED, ...)，
-    于是鉴权失败也走 HTTP 200（业务码 6001）——nginx 访问日志、监控告警、WAF 看到的
-    失败尝试与成功访问完全一样，令牌爆破在传输层不可观测。
-    改为抛出本异常，由 main.py 统一回 HTTP 401 + code=6001：传输层可见失败，
+    该异常由 main.py 统一转为 HTTP 401 + code=6001，使 nginx 访问日志、监控和
+    WAF 能区分失败尝试与成功访问，令令牌爆破在传输层可见。
     前端语义不变（管理端前端同时兼容 HTTP 401/403 与 code=6001）。
     """
     def __init__(self, msg: str = "管理令牌无效或已被锁定"):
@@ -128,9 +117,7 @@ def get_client_ip(request: Request) -> str:
 
 
 # Redis 原子限流：用 Lua 保证「清窗+计数+写入」原子。
-# 滑动窗口：原实现是 INCR+EXPIRE 的固定窗口——窗口边界处可叠加两个窗口的配额，
-# 最坏 2 倍突发（例如限 10/min，在 00:59 打 10 次、01:00 再打 10 次，2 秒内 20 次全放行）。
-# 改为滑动日志（ZSET，score=毫秒时间戳）：每次请求先剔除窗口外成员再计数，
+# 滑动窗口使用 ZSET 滑动日志（score=毫秒时间戳）：每次请求先剔除窗口外成员再计数，
 # 任意连续 window 秒内最多 limit 次，彻底消除边界突发；代价是每键一个 ZSET（成员随请求增长，
 # 但窗口过期后整键 EXPIRE 回收，内存可控）。
 _LUA_SLIDING = """
@@ -180,7 +167,7 @@ if redis.call('GET', KEYS[1]) == ARGV[1] then
 end
 return 0
 """
-# Redis 故障降级放行时返回的哨兵令牌：本次根本没写进 Redis，释放时必须直接跳过，
+# Redis 故障降级放行时返回的哨兵令牌：该次根本没写进 Redis，释放时必须直接跳过，
 # 否则一旦 Redis 在请求期间恢复，DELETE 会把别人正在持有的锁删掉。
 _DEGRADED_LOCK_TOKEN = "__redis_degraded__"
 
@@ -193,8 +180,8 @@ async def redis_acquire_lock(redis_client, key: str, ttl_seconds: int,
     TTL 必须给足：进程崩溃时靠 TTL 自动释放，不会永久死锁。Redis 故障默认遵循
     REDIS_FAIL_CLOSED；确有独立数据库护栏的调用方可显式选择降级放行。
 
-    返回值由 bool 改为令牌字符串，`if not await redis_acquire_lock(...)` 的判空写法不变；
-    令牌必须原样传给 redis_release_lock，否则释放会静默失效（宁可留到 TTL 过期）。"""
+    返回值是锁令牌字符串；令牌必须原样传给 redis_release_lock，否则释放会静默失效
+    （宁可留到 TTL 过期）。"""
     token = secrets.token_urlsafe(24)
     if redis_client is None:
         return _DEGRADED_LOCK_TOKEN
@@ -215,10 +202,10 @@ async def redis_acquire_lock(redis_client, key: str, ttl_seconds: int,
 async def redis_release_lock(redis_client, key: str, token: str = "") -> None:
     """释放互斥锁：只删自己加的那把。失败不影响主流程（TTL 到期后会自行回收）。
 
-    原实现无条件 DELETE：当持锁方的执行时间超过 TTL（支付平台退款接口慢、
-    进程被 GC/网络卡住），锁会自动过期并被下一个请求抢到，此时前一个请求的
-    finally 里这记 DELETE 删掉的是**别人**的锁，第三个请求随即也能进来——互斥彻底失效。
-    这不再是理论问题：api/admin.py 的管理员兜底退款在订单已是 refund_pending 时
+    释放时必须校验锁令牌，不能无条件 DELETE：当持锁方的执行时间超过 TTL，
+    锁会自动过期并被下一个请求抢到，前一个请求随后 DELETE 掉的会是**别人**的锁，
+    第三个请求随即也能进来，互斥彻底失效。api/admin.py 的管理员兜底退款等长耗时
+    资金操作依赖该互斥边界。
     不做数据库 CAS（同值 UPDATE 在 MySQL 下 affected_rows 恒为 0），这把 Redis 锁
     是该分支唯一的并发护栏，误删即等于两个管理员各向支付平台发起一笔真实退款。"""
     if not token or token == _DEGRADED_LOCK_TOKEN:
@@ -233,7 +220,7 @@ async def redis_acquire_lock_fresh(db, redis_client, key: str, ttl_seconds: int,
                                    fail_closed: bool | None = None) -> str:
     """抢互斥锁，抢到后立即结束当前事务以丢弃陈旧读快照；未抢到返回空串。
 
-    为什么必须「换快照」：生产 MySQL 默认 REPEATABLE-READ，一致性读走的是「本事务第一次
+    抢锁后必须结束旧事务以「换快照」：生产 MySQL 默认 REPEATABLE-READ，一致性读走的是「本事务第一次
     读取时建立的快照」。调用方在抢锁之前通常已经做过多次 SELECT（鉴权、权益、会员态），
     该快照早于并发对手提交写入的时刻——于是「先抢锁、再计数」里的计数读到的仍是拿锁前的
     旧值，互斥对本类「计数后判定」的逻辑（会员额度）等于没加，额度仍被并发整倍穿透。

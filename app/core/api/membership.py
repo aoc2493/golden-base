@@ -20,8 +20,8 @@ async def membership_status(user: User = Depends(get_current_user),
 
     前端契约要求 data.membership 包裹状态对象
     （page-logic.js 三处均以 ms.membership.level / is_vip / in_grace 读取）。
-    原实现裸返回状态字典，data.membership 恒为 undefined，
-    会员中心据此误判「状态获取失败」并把购买入口整段隐藏——会员永远买不了。
+    必须用 data.membership 包裹状态字典，否则会员中心会误判「状态获取失败」
+    并把购买入口整段隐藏。
 
     with_usage=True：额度卡要展示 period_used（本周期已用），而 get_member_status
     默认不统计该项（见其 docstring）。这是唯一需要该统计的调用方。
@@ -48,9 +48,8 @@ async def membership_plans(user: User = Depends(get_current_user),
         "name": p.name,
         "description": p.description,
         "price": float(p.price),
-        # days_for_level 收的是「档位」(month/year/lifetime)，不是商品 sku_code：
-        # 原来直接传 p.sku_code 去查 LEVEL_DAYS 必然落空，套餐有效期天数恒为 null。
-        # 终身档本就应为 None（无到期日），月/年档必须先用 level_of_sku 归一化。
+        # days_for_level 收的是「档位」(month/year/lifetime)，不是商品 sku_code；
+        # 月/年档必须先用 level_of_sku 归一化，终身档为 None（无到期日）。
         "days": days_for_level(level_of_sku(p.sku_code)),   # vip_lifetime -> None
     } for p in rows]})
 

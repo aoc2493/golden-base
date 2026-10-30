@@ -1,7 +1,7 @@
 """电子发票 —— 开票资格判定、字段校验、退款联动与台账序列化。
 
-为什么单独一个 service 而不把规则写在 api/invoice.py 里：
-同一套资格判据有三个消费方——用户端的「能否开票」查询、用户端的提交申请、
+资格规则放在 service 而非 api/invoice.py：同一套判据有三个消费方——
+用户端的「能否开票」查询、用户端的提交申请、
 以及前端的按钮亮暗。写在路由里就只能被一个入口用，另两个入口各自复制一份，
 而三份口径里只要有一份写差，就会出现「按钮是亮的、点了却报错」或
 「按钮是灰的、其实能开」——前者让用户以为系统坏了，后者等于变相拒开发票
@@ -46,7 +46,7 @@ REAPPLY_STATUSES = (ST_REJECTED, ST_CANCELLED)
 _RE_TAX_NO = re.compile(r"^[0-9A-Z]{15,20}$")
 _RE_EMAIL = re.compile(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
 
-# 订单状态到「为什么不能开票」的映射。逐态给具体原因而不是统一一句「不符合条件」：
+# 订单状态到「不能开票的原因」的映射。逐态给具体原因而不是统一一句「不符合条件」：
 # 用户不知道自己该做什么（去付款？等退款结果？找客服？）时，只会重复点击然后投诉。
 _STATUS_REASON = {
     "pending": "订单尚未支付成功，付款成功后即可申请开票",
@@ -88,7 +88,7 @@ def order_block(order: Order, inv: InvoiceRequest = None, *, now: datetime = Non
     if order.status != "completed":
         return (ErrorCode.INVOICE_NOT_ELIGIBLE,
                 _STATUS_REASON.get(order.status, f"订单状态为 {order.status}，暂不可开票"))
-    # 0 元单（会员权益内生成的解读单、补偿单）没有收款事实，开票义务不成立。
+    # 0 元单（会员权益内生成的报告单、补偿单）没有收款事实，开票义务不成立。
     # 用 Decimal 比较而不是 float：金额判据一旦用浮点，0.00 与 0.004 的区别就说不清了。
     if order.amount is None or Decimal(str(order.amount)) <= Decimal("0"):
         return (ErrorCode.INVOICE_NOT_ELIGIBLE,
@@ -264,7 +264,7 @@ async def on_order_refunded(db: AsyncSession, order: Order) -> str:
 
     挂在 fulfillment.revoke_refunded_order 里，一处覆盖全部 5 条退款路径
     （用户自助退款、管理员兜底退款、微信退款回调、失败报告自动退款、退款失败重试）。
-    放在各调用点上必然漏，而漏掉的那一条正是「钱退了票还开着」的成因。
+    放在各调用点上容易漏掉某条退款路径，导致退款后发票仍处于有效状态。
 
     两个分支都不能不做：
       · 待开具 → 自动作废。交易已经不存在，此时开票就是为不存在的交易开具发票（虚开）。

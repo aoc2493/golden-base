@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 # Cookie 名称（httpOnly Cookie 存 token，兼容旧版 localStorage）
 AUTH_COOKIE_NAME = "auth_token"
 
-# #6 CSRF：跨域部署（SameSite=none）下 Cookie 会随跨站请求自动携带，
+# CSRF：跨域部署（SameSite=none）下 Cookie 会随跨站请求自动携带，
 # 此时必须由前端 fetch 统一附加一个自定义头作为「同源意图」证明。
 # 跨站攻击者用 <form> 提交无法设置自定义头；用 fetch 设置则会触发 CORS 预检，
 # 而 CORS_ORIGINS 生产不放行 *，预检必被拒——两条路都走不通，CSRF 即被阻断。
@@ -112,11 +112,9 @@ async def add_to_blacklist(user_id: int, jti: str, ttl_seconds: int) -> bool:
     返回 True 表示「已撤销 / 无需撤销」，False 表示「撤销失败，该 token 在自然
     过期前仍然有效」。
 
-    原实现返回 None 且异常只在内部 warning：调用方无从区分
-    「已拉黑」与「Redis 故障、什么都没做」，退出登录一律回「已退出登录」。
-    共享设备场景下用户据此认为会话已失效，实际 token 仍可继续使用到自然过期；
-    而服务端日志只有一条 warning，事故复盘时无法回答「谁在何时退出失败」。
-    改为返回布尔值，由调用方把失败如实回给用户（详见 api/auth.py 的 /logout）。
+    调用方必须能区分「已拉黑」与「Redis 故障、什么都没做」，并在后者如实告知
+    用户会话尚未失效；否则共享设备上的 token 仍可使用到自然过期，事故复盘时
+    也无法回答「谁在何时退出失败」。
     Redis 未配置（redis_client=None，sqlite 轻量/开发模式）不属于故障，
     按项目既有约定返回 True（与 _is_token_blacklisted 同口径），仅 warning 留痕。
     """
@@ -148,12 +146,9 @@ async def add_user_to_blacklist(user_id: int, ttl_seconds: int = None) -> None:
 
 
 # ============ 设备码「已释放」标记============
-# 设备码是外部浏览器下的长期登录凭证（无口令、无过期、登出不影响），一旦落在
-# 共享/二手设备上就等于把账号交给下一个人。此前没有任何处置手段：用户退出登录后
-# 该码仍绑定原账号，任何人打开页面即进入；而「解绑」若只把 users.device_code 置空，
-# 旧码又会走 /login 的「查无用户 → 新建账号」分支，静默生成一个全新空账号——
-# 用户视角是「我的订单/会员/余额全不见了」，比不解绑更难解释。
-# 因此释放时必须同时登记「该码已失效」，登录链路据此明确拒绝而不是静默建号。
+# 设备码是外部浏览器下的长期登录凭证（无口令、无过期、登出不影响），落在共享或
+# 二手设备上会直接暴露账号。解绑时必须同时登记「该码已失效」，登录链路据此明确拒绝；
+# 若只把 users.device_code 置空，旧码会进入「查无用户 → 新建账号」分支并静默建号。
 _DEVICE_RELEASED_PREFIX = "dev_released:"
 # 保留期：设备码只存在于浏览器 localStorage，90 天足以覆盖旧设备/二手设备的复用窗口
 _DEVICE_RELEASED_TTL = 90 * 24 * 3600
@@ -183,7 +178,7 @@ async def is_device_code_released(device_code: str) -> bool:
     """设备码是否已被释放（登录链路据此拒绝并给出明确文案）。
 
     本函数刻意 fail-open：它只承担「拒绝 + 明确提示」，Redis 故障时放行的最坏
-    结果是回到修复前的静默建号行为，不构成越权或资损；反过来若 fail-closed，
+    结果是回到异常状态的静默建号行为，不构成越权或资损；反过来若 fail-closed，
     Redis 一宕机全部设备码用户都登录不了，是不可接受的可用性事故。
     """
     code = (device_code or "").strip()
@@ -245,11 +240,8 @@ async def get_current_user(
     优先 Bearer 头（兼容旧前端 localStorage 存量），其次 Cookie（新会话）。
 
     必须复用请求级 get_db 会话（FastAPI 对同一依赖在单请求内缓存，故与路由中的
-    db: Depends(get_db) 是同一个 session）。此前这里自行 AsyncSessionLocal() 开了
-    独立会话并随 with 块关闭，返回的是 detached User：路由/服务层对该 user 的属性
-    修改（成年声明 declared_birth_date、注销 status、昵称头像、邀请绑定等）不在
-    请求会话的事务内，get_db 退出时 commit 不到，表现为接口返回成功但改动静默
-    丢失——成年声明留痕落库、用户字段却没写，成年门槛永远过不去。
+    db: Depends(get_db) 是同一个 session）。返回的 User 必须处于 persistent 状态，
+    使路由/服务层对 status、昵称头像、邀请绑定等属性的修改随请求事务一起提交。
     """
     token = None
     token_from_cookie = False
@@ -261,7 +253,7 @@ async def get_current_user(
     if not token:
         raise HTTPException(status_code=401, detail="未登录或登录已失效")
 
-    # #6 CSRF：Cookie 会话 + 不安全方法 + 跨域部署（SameSite=none）三者同时成立时，
+    # CSRF：Cookie 会话 + 不安全方法 + 跨域部署（SameSite=none）三者同时成立时，
     # 要求请求携带自定义头证明同源意图；缺失即视为跨站伪造，拒绝。
     if (token_from_cookie
             and request.method.upper() in _UNSAFE_METHODS

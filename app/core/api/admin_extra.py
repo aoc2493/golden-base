@@ -1,18 +1,4 @@
-"""管理端全量数据映射：把此前只在库里、后台看不到的数据全部暴露给运营后台。
-
-背景：管理后台是站内最高权限入口，运营者需要看到系统全部数据：
-- 审计日志 admin_operation_logs（此前只写不读，118 条沉在库里）
-- 合规留痕 compliance_consents、AI 生成留痕 ai_generation_logs（留存表）
-- 用户反馈 feedbacks（H5 有提交入口，后台无查看界面，反馈石沉大海）
-- 系统配置 system_configs（改公告/开关只能直接改库）
-- 归因触达 attribution_touches、会员流水 membership_ledger、
-  验证付费台账 verified_paid_users、考试记录 exam_records、
-  违规记录 violation_records（全量，不限单个推广员）、月度业绩 monthly_performances
-- 用户详情补齐：插件业务数据（经注册表聚合）、权益明细 user_entitlements
-
-写操作仅两个（反馈处理 / 配置修改），复用 require_admin 门禁（令牌+锁定+IP白名单），
-配置修改另要求操作密码并落审计日志，与 admin.py 敏感操作口径一致。
-"""
+"""管理端只读数据映射与少量受控写操作。"""
 import json
 from datetime import datetime
 from decimal import Decimal
@@ -30,7 +16,7 @@ from app.core.services import credential as credential_svc
 from app.core.models import (
     AdminOperationLog, ComplianceConsent, Feedback, SystemConfig,
     AiGenerationLog, AttributionTouch, MembershipLedger, VerifiedPaidUser,
-    ExamRecord, ViolationRecord, MonthlyPerformance, UserEntitlement,
+    ViolationRecord, MonthlyPerformance, UserEntitlement,
     Report, CommissionFailLog, PasswordResetTicket, User,
 )
 from app.core.schemas import AdminPasswordResetRequest
@@ -89,7 +75,7 @@ def _deny(is_admin):
     return None
 
 
-# ---------- 审计日志（此前只写不读） ----------
+# ---------- 审计日志 ----------
 @router.get("/audit-logs")
 async def admin_audit_logs(page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100),
                            action: str = Query("", max_length=60),
@@ -176,15 +162,14 @@ async def admin_configs(db: AsyncSession = Depends(get_db),
 # 可写配置键白名单：system_configs 的消费方全仓枚举
 # （config_helper 的 get_config/get_bool/get_float/get_int 全部调用点
 #  + main.py 初始化种子 + system.py 公开配置白名单 _PUBLIC_KEYS）。
-# 原实现允许创建任意 ≤50 字符的新键——当前虽无敏感消费方，但「管理令牌即全量写」
-# 的敞开面意味着未来任何新增安全相关键（开关/费率/阈值）都会即刻暴露在
-# 本接口下且无人 review。白名单外的新键一律拒绝；新增配置项必须先在此登记。
+# 配置写入必须使用白名单。允许创建任意键会令未来新增的安全相关键（开关/费率/阈值）
+# 立即暴露在本接口下且未经审核。白名单外的新键一律拒绝；新增配置项必须先在此登记。
 _CONFIG_WRITABLE_KEYS = {
     # 业务开关（get_bool）
     "paid_reports_enabled", "refund_enabled", "distribution_enabled", "invoice_enabled",
     # 运营文案/展示（system.py _PUBLIC_KEYS 中的可写项）
     "announcement", "vip_benefits", "theme", "result_cache_days",
-    # 规则文本与版本号（仅影响展示文案，费率仍在 .env/settings，见 distribution.py L1060）
+    # 规则文本与版本号仅影响展示；费率仍来自 settings。
     "membership_rules", "membership_rule_version",
     "distribution_rules", "distribution_rule_version",
     # 分销运营参数（get_float/get_int）
@@ -210,8 +195,8 @@ async def admin_config_update(request: Request,
     if key not in _CONFIG_WRITABLE_KEYS:
         return error(ErrorCode.PARAM_ERROR,
                      "该配置键不在可写白名单内；新增配置项需在后端 _CONFIG_WRITABLE_KEYS 登记后再开放")
-    # value 收敛为非空字符串且 ≤2000 字符——原实现任意 JSON 都照单写入，
-    # 一条大对象/数字/嵌套结构会让消费方按 str 读值时行为不可预期。
+    # value 收敛为非空字符串且 ≤2000 字符，避免大对象、数字或嵌套结构令
+    # 消费方按 str 读值时行为不可预期。
     value = payload.get("value")
     if value is None or not isinstance(value, str) or not value.strip():
         return error(ErrorCode.PARAM_ERROR, "配置值必须为非空字符串")
@@ -297,22 +282,6 @@ async def admin_verified_paid(page: int = Query(1, ge=1), page_size: int = Query
                                 page, page_size, filters))
 
 
-# ---------- 考试记录 ----------
-@router.get("/exam-records")
-async def admin_exam_records(page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100),
-                             user_id: int = Query(None),
-                             db: AsyncSession = Depends(get_db),
-                             is_admin: bool = Depends(require_admin)):
-    err = _deny(is_admin)
-    if err:
-        return err
-    filters = [ExamRecord.user_id == user_id] if user_id else None
-    return success(await _paged(db, ExamRecord,
-                                ["id", "user_id", "distributor_id", "score", "passed",
-                                 "attempt_no", "created_at"],
-                                page, page_size, filters))
-
-
 # ---------- 违规记录（全量；单推广员视角 admin.py 已有 /distributors/{id}/violations） ----------
 @router.get("/violations")
 async def admin_violations(page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100),
@@ -329,7 +298,7 @@ async def admin_violations(page: int = Query(1, ge=1), page_size: int = Query(20
         filters.append(ViolationRecord.level == level)
     return success(await _paged(db, ViolationRecord,
                                 ["id", "distributor_id", "user_id", "level", "action", "reason",
-                                 "order_id", "report_ticket_id", "frozen_until", "clawback_amount",
+                                 "order_id", "frozen_until", "clawback_amount",
                                  "handler", "status", "created_at"],
                                 page, page_size, filters or None))
 
@@ -351,7 +320,7 @@ async def admin_performances(page: int = Query(1, ge=1), page_size: int = Query(
                                 page, page_size, filters, order_col=MonthlyPerformance.month))
 
 
-# ---------- 计佣失败记录（abandoned=佣金永久丢失，需人工介入；此前后台零可见） ----------
+# ---------- 计佣失败记录（abandoned=佣金永久丢失，需人工介入） ----------
 @router.get("/commission-fails")
 async def admin_commission_fails(page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100),
                                  status: str = Query("", max_length=20),
@@ -369,17 +338,17 @@ async def admin_commission_fails(page: int = Query(1, ge=1), page_size: int = Qu
                                 page, page_size, filters))
 
 
-# ---------- 命书报告（reports：一单一报告；failed=已付费未交付，关键运营事故） ----------
+# ---------- 业务报告（reports：一单一报告；failed=已付费未交付） ----------
 @router.get("/report-docs")
 async def admin_report_docs(page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100),
                             status: str = Query("", max_length=20),
                             db: AsyncSession = Depends(get_db),
                             is_admin: bool = Depends(require_admin)):
-    """命书报告状态台账。status generating/completed/failed/refunded；failed 表示用户
-    已付费但命书未生成成功，需人工重跑或退款——此前 admin 端对 reports 表零可见。
+    """业务报告状态台账。status generating/completed/failed/refunded；failed 表示用户
+    已付费但报告未生成成功，需人工重跑或退款。
     列表不返回 chapters/ai_meta 大 JSON 字段，避免单次查询拉回海量正文。
     deleted_at 一并返回——refunded 行的该列即「退款软销毁」时间（用户端
-    「解读历史」「我的收藏」全部入口不可达，正文仍留在库内可复原）；completed
+    「报告历史」「我的收藏」全部入口不可达，正文仍留在库内可复原）；completed
     行非空则是用户自助删除。"""
     err = _deny(is_admin)
     if err:
@@ -437,7 +406,7 @@ async def admin_password_reset(
         request: Request,
         db: AsyncSession = Depends(get_db),
         is_admin: bool = Depends(require_admin)):
-    """Manual reset for deployments without SMTP; password is never returned."""
+    """无 SMTP 部署的人工密码重置入口，响应不返回密码。"""
     err = _deny(is_admin)
     if err:
         return err

@@ -47,7 +47,7 @@ def order_delivers_report(order) -> bool:
     """该订单的交付物是否为 reports 表中的一份报告（决定自愈是否补触发）。
 
     完全由能力的 delivery 形态决定：cap.delivery == REPORT 即产报告；
-    会员 0 元解读单（member_view_sku）同样能经 cap_by_sku 命中其能力。
+    会员 0 元报告单（member_view_sku）同样能经 cap_by_sku 命中其能力。
     未注册 SKU 保守按报告处理（不因漏注册而阻断自愈）。
     """
     ptype = order.product_type or ("report" if order.product_id else "")

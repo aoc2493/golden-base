@@ -30,9 +30,8 @@ from app.core.utils.alert import install_alert_handler, send_alert, alert_ready
 from app.core.utils.sanitizer import sanitize_log
 
 # ---- 链路追踪 ----
-# 全仓此前没有 request_id/trace_id，一次请求打出的多条日志无法互相关联，
-# 排障只能靠业务号（order_no）在海量日志里 grep。这里用 ContextVar 承载，
-# 便于在 async 并发下正确隔离（不用全局变量，避免请求间互相污染）。
+# 用 request_id/trace_id 关联一次请求打出的多条日志，避免只能靠业务号
+# 在海量日志里检索。ContextVar 在 async 并发下天然隔离请求上下文。
 import contextvars
 import uuid
 
@@ -118,8 +117,7 @@ _SAMPLE_SECRET_VALUES = {
 
 def _startup_check():
     """启动自检：默认密钥/弱密码/生产CORS/HTTPS回调/H5 来源
-    密钥类检查改为 fail-closed——任何环境（含开发/演示）未配置或仍用默认值一律阻断启动，
-    不再按环境白名单放行已知密钥。"""
+    密钥类检查在任何环境（含开发/演示）都 fail-closed：未配置或仍用默认值一律阻断启动。"""
     warns = []
     errors = []
     blocking = []
@@ -230,11 +228,9 @@ def _startup_check():
         if not settings.ADMIN_TOKEN or settings.ADMIN_TOKEN == "change-me-admin-token":
             errors.append("生产环境必须在 .env 配置自定义 ADMIN_TOKEN，禁止使用代码默认值")
         # 合规：AI 生成合成内容必须带真实服务提供者标识（《标识办法》+ GB 45438-2025）。
-        # 【接线状态】core 只提供标识工具（utils/ai_mark.py），自己不生成任何内容，
-        # 所以全库没有写入点：reports.ai_meta 要由真正调用模型的插件在生成时写。
-        # 由阻断降为最高级告警的理由：不含 AI 内容的部署没有法定标识义务，为一个此刻
-        # 用不到的能力拦着服务起不来，只会逼使用者填一个假的主体名——那才是合规的反面。
-        # 接入 AI 生成的插件时必须配置本项，故用 advisories（启动即以 ERROR 级打印）。
+        # core 只提供标识工具（utils/ai_mark.py），reports.ai_meta 由生成内容的业务插件
+        # 在生成时写入。不含 AI 内容或未接入此类插件的部署没有该标识义务，因此这里以
+        # ERROR 级启动告警提示配置，接入 AI 生成能力时必须填写真实备案/经营主体。
         if not (settings.AI_MARK_PROVIDER_NAME or "").strip():
             advisories.append("生产环境未配置 AI_MARK_PROVIDER_NAME：utils/ai_mark.py 的生成内容标识"
                               "（隐式元数据 + 显式文案）无法产出合规主体名。本项只在「插件真的生成 "
@@ -294,9 +290,6 @@ def _startup_check():
         if not settings.WITHDRAW_TAX_ENABLED:
             gaps.append("WITHDRAW_TAX_ENABLED=false：推广佣金提现不代扣个人所得税，"
                         "平台仍须自行履行代扣代缴/申报义务")
-        gaps.append("年龄门槛（成年声明/监护同意）在本底座里恒放行："
-                    "minor_guard.gate_payer/gate_bio 恒放行，下单与建档不再做未成年人拦截；"
-                    "若业务面向未成年人不可及场景，需在运营侧另做限制")
         if settings.COMPLIANCE_DECISIONS_ACK:
             advisories.extend(gaps)
         else:
@@ -365,7 +358,7 @@ async def _verify_schema():
     """启动期结构校验：ORM 声明的每张表、每一列都必须真实存在。
 
     只读检查，不改库。缺表/缺列时：生产环境拒绝启动（否则是「服务起来了、用户一点就 500」），
-    非生产环境打 ERROR 日志继续跑（本地旧库仍可调试）。修复口径写在 sql/migrations/：
+    非生产环境打 ERROR 日志继续跑（本地旧库仍可调试）。增量升级脚本位于 sql/migrations/：
     初始化脚本 sql/init.sql 只在空数据卷首次启动时执行，存量库必须手工跑增量脚本。
     """
     from sqlalchemy import inspect
@@ -449,8 +442,7 @@ async def _seed_base_data(db=None):
             "周期总额度池全部能力共享，历史记录可查（具体额度见会员规则）",
             "优先客服与新能力优先体验",
         ]
-        # 系统配置同样逐键补齐：原实现是「表里有一行就整体跳过」，
-        # 运营手工加过任意一条（如公告）后，其余缺省键就永远不再落库。
+        # 系统配置逐键补齐，不能因运营手工添加过任意一条（如公告）就跳过其余缺省键。
         cfg_defaults = {
             "paid_reports_enabled": True,
             "refund_enabled": True,
@@ -564,13 +556,9 @@ async def request_id_middleware(request: Request, call_next):
     return response
 
 
-# 全局请求体上限：无上限时攻击者可用超大 body 耗尽内存/带宽（multipart 上传另有
-# RATE_LIMIT_UPLOAD_PER_MIN 但 body 本身仍可巨大）。
-# 原实现是 @app.middleware("http")（BaseHTTPMiddleware），只做了 Content-Length 预检，
-# 注释宣称的「chunked 流式兜底」从未实现——攻击者用 Transfer-Encoding: chunked（不带 Content-Length）
-# 即可绕过预检，让下游 request.body() 把任意大的 body 全量读进内存；且 BaseHTTPMiddleware 下
-# request.body() 会先缓冲整个 body 再交下游，结构上就无法做流式限制。
-# 改为纯 ASGI 中间件：包装 receive 逐块累计已读字节，超限立即中断，内存占用恒定在上限内。
+# 全局请求体上限：无上限时攻击者可用超大 body 耗尽内存/带宽。multipart 上传另有
+# RATE_LIMIT_UPLOAD_PER_MIN，但 body 本身仍需要独立上限。纯 ASGI 中间件包装 receive
+# 并逐块累计已读字节，chunked 传输也无法绕过，内存占用恒定在上限内。
 _MAX_BODY_BYTES = 8 * 1024 * 1024  # 8MB：头像/反馈图上传的合理上限，远超任何 JSON 接口需求
 
 
@@ -652,9 +640,8 @@ class CSRFMiddleware:
         a) 带 Bearer 令牌：令牌由前端显式放入请求头，浏览器不会自动附带，天然不是 CSRF 面；
         b) 支付平台回调：服务端到服务端，无 Origin/Referer，安全性由验签 + 金额校验 + 幂等保证；
         c) Origin（缺失时回退 Referer）的 host:port 等于请求 Host，或命中 CORS_ORIGINS。
-      此前 `/api/*` 被整体豁免，等于只靠 Cookie 的 SameSite=Lax 兜底：部署方一旦为跨域把
-      AUTH_COOKIE_SAMESITE 设为 none，CSRF 防护就完全消失（而 SECURITY.md 声称的
-      「跨域部署要求自定义头」在代码里并不存在）。现在这条判据把缺口补上。
+      三种来源判据覆盖 Bearer、支付回调和浏览器同源请求。仅依赖 Cookie 的
+      SameSite=Lax 会在跨域部署将 AUTH_COOKIE_SAMESITE 设为 none 时失去 CSRF 防护。
     · 其余路径（模板表单）：保留双提交 Cookie——csrf_token 与 X-CSRF-Token 必须一致。
 
     非浏览器客户端用 Cookie 会话发状态变更请求时需自带 Origin，或改用 Bearer 令牌。
@@ -769,8 +756,8 @@ async def security_headers(request: Request, call_next):
     resp.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     resp.headers["Permissions-Policy"] = "geolocation=(self)"
     if settings.CSP_ENABLED:
-        # CSP 原先完全缺失：仅靠输出转义防 XSS，一旦漏转（已修过的 birth_date 就是例子）
-        # 注入内容就能直接执行。script-src 'self' 能把这类漏转从“可执行”降为“仅能改样式/文本”。
+        # CSP 作为输出转义的纵深防线。script-src 'self' 可把意外的标记注入
+        # 从“可执行脚本”限制为“仅能改样式或文本”。
         resp.headers["Content-Security-Policy"] = (
             "default-src 'self'; "
             "script-src 'self'; "
@@ -810,7 +797,7 @@ async def global_exception_handler(request: Request, exc: Exception):
 
 
 # 统一 HTTPException 响应体为 {code,msg,data} 信封（保留原 HTTP 状态码）。
-# 起因：主鉴权依赖 get_current_user 对令牌缺失/过期/无效抛 HTTPException(401)、账号禁用抛 403，
+# 主鉴权依赖 get_current_user 对令牌缺失/过期/无效抛 HTTPException(401)、账号禁用抛 403，
 # 走 FastAPI 默认处理只回 {"detail":...}；而前端 api.js 只认业务码 code=1002(NOT_LOGIN) 才清 token、
 # 并在支付轮询 pollPaid 里据 code=1002 自动重登——令牌过期时这套恢复逻辑形同虚设，用户只见「请求失败」。
 # 这里把 401/403/429 映射到既有 ErrorCode，让前端既有的会话恢复链路真正生效，且全站响应体口径一致。
@@ -833,7 +820,7 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException):
 
 
 # 统一 pydantic 参数校验失败（HTTP 422）响应体为 {code,msg,data}。
-# 起因：FastAPI 默认对 RequestValidationError 只回 {"detail":[{type,loc,msg,ctx}]}
+# FastAPI 默认对 RequestValidationError 只回 {"detail":[{type,loc,msg,ctx}]}
 # 这种结构，而全站前端只认 code/msg，于是「密码长度不能少于 8 位」「邮箱格式不正确」
 # 这些后端早已写好的精确中文提示被 pydantic 抢先，用户只能看到兜底的「提交失败，请稍后重试」，
 # 甚至去猜“是不是服务挂了”。这里把 detail 翻成人能读的一句话，同时保留 422 状态码
@@ -844,7 +831,7 @@ _FIELD_LABELS = {
     "nickname": "昵称", "purpose": "用途", "invite_code": "邀请码",
     "amount": "提现金额", "account_name": "收款人姓名", "account_no": "收款账号",
     "order_id": "订单", "reason": "原因", "title": "发票抬头", "tax_no": "纳税人识别号",
-    "doc_type": "文件类型", "platform": "平台", "birth_date": "出生日期",
+    "doc_type": "文件类型", "platform": "平台",
     "operate_password": "操作密码",
 }
 
@@ -895,8 +882,8 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 async def admin_auth_denied_handler(request: Request, exc: AdminAuthDenied):
     """管理端鉴权失败：HTTP 401 + 既有业务码 6001。
 
-    上线前检查：此前该失败以 HTTP 200 返回，nginx 日志/监控/WAF 无法与正常请求区分，
-    令牌爆破在传输层不可观测。改为 401 后可被统计与告警，响应体仍保持 code/msg/data 口径。
+    鉴权失败返回 HTTP 401，使 nginx 日志、监控与 WAF 能与正常请求区分并统计
+    令牌爆破；响应体仍保持 code/msg/data 口径。
     """
     return JSONResponse(
         status_code=401,
@@ -904,7 +891,7 @@ async def admin_auth_denied_handler(request: Request, exc: AdminAuthDenied):
     )
 
 
-# 注册路由（统一前缀 /api）。移除遗留 /api/report 旧报告接口，收敛攻击面
+# 注册路由（统一前缀 /api）。
 app.include_router(auth.router, prefix="/api")
 app.include_router(system.router, prefix="/api")
 app.include_router(order.router, prefix="/api")
@@ -947,7 +934,7 @@ async def server_info():
 
 @app.get("/health")
 async def health():
-    """Liveness plus dependency readiness without exposing internal details."""
+    """同时检查进程存活和关键依赖可用性，不暴露内部细节。"""
     from sqlalchemy import text
     from app.core.database import AsyncSessionLocal
     from app.core.auth import redis_client
@@ -984,8 +971,8 @@ if settings.WEB_ROOT and os.path.isdir(settings.WEB_ROOT):
     @app.get("/{full_path:path}")
     async def spa_fallback(full_path: str):
         """SPA 兜底：非 API 路径一律返回 index.html（防目录穿越：只允许目录内文件）。
-        /api/* 未匹配路由必须显式 404 JSON：此前被本兜底吞成 200+HTML，
-        前端 resp.json() 解析失败才知道「接口不存在」，也让 curl 探活误判为存在。"""
+        /api/* 未匹配路由必须显式返回 404 JSON，不能由 SPA 兜底吞成
+        200+HTML，否则前端与探活工具都会误判接口存在。"""
         from starlette.responses import FileResponse
         import os as _os
         if full_path == "api" or full_path.startswith("api/"):

@@ -50,9 +50,8 @@ def build_authorize_url(state: str = "", scope: str = "snsapi_base") -> Optional
     if not appid or not redir:
         logger.warning("微信网页授权未配置 AppID/回跳域名，无法生成授权链接")
         return None
-    # 不在此处截断：sign_state 已保证整串（payload + "." + 24位签名）不超过微信的
-    # 128 字节上限。原来的 (state or "STATE")[:128] 砍掉的正是签名尾部，
-    # 导致回跳后验签必然失败、微信内无法登录。
+    # 不在此处截断：sign_state 已保证整串（payload + "." + 24 位签名）不超过微信的
+    # 128 字节上限；截断会砍掉签名尾部并导致回跳后验签失败。
     state = state or "STATE"
     if len(state) > 128:
         logger.warning(f"授权 state 长度 {len(state)} 超出微信 128 字节上限，将被微信侧截断")

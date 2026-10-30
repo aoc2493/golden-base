@@ -87,7 +87,7 @@ async def favorite_add(req: FavoriteAddRequest,
         if not row:
             return error(ErrorCode.PARAM_ERROR, "报告不存在")
         order, _report = row
-        title = (order.product_name or "解读报告")[:100]
+        title = (order.product_name or "业务报告")[:100]
         sub = _fmt_dt(order.created_at) or ""
         payload = None
     else:

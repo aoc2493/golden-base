@@ -70,7 +70,7 @@ def test_empty_and_none_pass_through_unencrypted():
 
 
 def test_legacy_plaintext_is_returned_unchanged():
-    """本次改动之前入库的明文没有前缀，必须原样可读（不做一次性迁移也能起服务）。"""
+    """尚未加密的存量明文没有前缀，必须原样可读（不做一次性迁移也能起服务）。"""
     assert cf.decrypt_field("张三", field="real_name") == "张三"
     assert not cf.is_encrypted("张三")
 
@@ -127,10 +127,9 @@ def test_other_key_cannot_decrypt(monkeypatch, caplog):
 def test_key_derivation_is_aes256_over_sha256():
     """派生密钥必须是 sha256(SENSITIVE_FIELD_KEY) 的 32 字节，钉死而不是「能加解密就行」。
 
-    起因（变异测试实跑出的存活变异）：把 `hashlib.sha256` 换成 `hashlib.md5` 后，
-    全部往返用例照样绿——AESGCM 接受 16 字节密钥，等于悄悄降级成 AES-128；
-    而下一次部署若再把派生方式换回去，库里所有密文都解不开（收款人永久丢失）。
-    强度与「派生方式不可改」都是这个模块的承诺，必须各自有断言。
+    若将 `hashlib.sha256` 换成 `hashlib.md5`，AESGCM 会接受 16 字节密钥并静默
+    降级成 AES-128；派生方式变更也会让既有密文无法解密。强度与派生方式不可变，
+    因此两者都必须有断言。
     """
     import hashlib
 

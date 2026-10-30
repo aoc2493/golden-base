@@ -154,25 +154,7 @@ class _Registry:
                     return e, level
         return None, None
 
-    def match_path(self, path: str) -> tuple[Optional[PluginEntry], Optional[Capability]]:
-        """按请求路径反查能力（用于运行期权益核销）。匹配最长 router 前缀。"""
-        best = None
-        best_len = 0
-        for e in self.plugins.values():
-            for r in e.routers:
-                prefix = getattr(r, "prefix")
-                if prefix and path.startswith(prefix) and len(prefix) > best_len:
-                    best, best_len = e, len(prefix)
-        return (best, None) if best else (None, None)
-
     # ---------- 聚合视图（供 core 通用模块使用，core 不硬编码任何业务码）----------
-    def sku_to_feature(self) -> dict[str, str]:
-        out = {}
-        for e in self.plugins.values():
-            for c in e.manifest.capabilities:
-                out[c.sku] = c.code
-        return out
-
     def feature_names(self) -> dict[str, str]:
         out = {}
         for e in self.plugins.values():
@@ -213,25 +195,11 @@ class _Registry:
                     out[c.member_view_sku] = c.sku
         return out
 
-    def all_single_skus(self) -> set[str]:
-        return {c.sku for e in self.plugins.values() for c in e.manifest.capabilities}
-
     def timepass_sku_minutes(self) -> dict[str, int]:
         out = {}
         for e in self.plugins.values():
             out.update(e.manifest.timepass_sku_minutes)
         return out
-
-    def lunar_converter(self):
-        """聚合：返回第一个提供农历转公历能力的插件 callable f(y,m,d)->date；没有则 None。"""
-        for e in self.plugins.values():
-            try:
-                fn = e.service.lunar_converter()
-            except Exception:
-                fn = None
-            if fn:
-                return fn
-        return None
 
     async def erase_user_data(self, user: Any, db: Any) -> None:
         """注销聚合：遍历插件清理其专属业务数据（core 通用表由 core 自管）。

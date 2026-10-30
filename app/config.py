@@ -45,7 +45,7 @@ class Settings(BaseSettings):
     # 数据库
     # DB_TYPE: mysql（生产）/ sqlite（轻量部署与开发验证，免 MySQL 依赖）
     # 通用底座：以下默认值一律中性，不含任何垂直业务/产品名。
-    # 存量部署若原先依赖代码默认值（未在 .env 显式配置 DB_NAME / DB_USER / DB_PASSWORD），
+    # 存量部署若当前依赖代码默认值（未在 .env 显式配置 DB_NAME / DB_USER / DB_PASSWORD），
     # 升级后必须在 .env 里显式补回自己的库名与账号，否则会连不上库。
     DB_TYPE: str = "mysql"
     SQLITE_PATH: str = "app.db"
@@ -82,23 +82,23 @@ class Settings(BaseSettings):
     #   proxy_set_header X-Proxy-Auth "同值";
     # 留空 = 不启用该校验（保持原行为）。
     PROXY_AUTH_SECRET: str = ""
-    # Shared secret presented by an upstream load balancer/host Nginx to the
-    # bundled Nginx. Only a request carrying it may contribute X-Real-IP.
+    # 外层负载均衡或宿主 Nginx 与内置 Nginx 的共享密钥；只有携带该密钥的请求
+    # 才能提交可信 X-Real-IP。
     EDGE_PROXY_AUTH_SECRET: str = ""
     # 严格 IP 策略开关（默认关闭以保持可上线）：
-    # 下面两项（管理 IP 白名单未配、信任反代头但未配共享密钥）此前一律只告警不阻断，
+    # 下面两项（管理 IP 白名单未配、信任反代头但未配共享密钥）目前一律只告警不阻断，
     # 原因写在 main.py 启动自检里——无固定办公出口 IP 的合法部署若强制白名单会「上线即起不来」，
     # 因此默认保持「最高级别告警」。置 True 后这两项在生产环境升级为**阻断项**（fail-closed），
     # 适合有固定出口 IP / 已接入堡垒机、且能接受配错即起不来的部署。
     SECURITY_STRICT_IP_POLICY: bool = False
     # 法定义务缺口的「本部署已逐项处置」确认位（默认 False = 生产环境拒绝启动）。
-    # 背景：底座里有三项合规控制处于关闭状态——支付前免责勾选的服务端校验
-    # （ENFORCE_PAYMENT_DISCLAIMER）、佣金提现代扣个税（WITHDRAW_TAX_ENABLED）、
-    # 年龄门槛（minor_guard 按项目决策恒放行）。它们的默认关闭都有正当理由
+    # 背景：底座里有两项合规控制处于关闭状态——支付前免责勾选的服务端校验
+    # （ENFORCE_PAYMENT_DISCLAIMER）与佣金提现代扣个税（WITHDRAW_TAX_ENABLED）。
+    # 它们的默认关闭都有正当理由
     # （不阻断开箱即用的演示、重新开启需业务侧先接 UI），但「默认关闭」和「没人决定过」
     # 在日志里长得一模一样：启动自检每天响一次 ERROR，响到第 30 天就没人看了，
     # 于是一个从未被处置的法定义务缺口可以一路静默到真实用户面前。
-    # 因此生产环境要求有人显式确认：COMPLIANCE_DECISIONS_ACK=true 表示「这三项我已逐条
+    # 因此生产环境要求有人显式确认：COMPLIANCE_DECISIONS_ACK=true 表示「这两项我已逐条
     # 判断过本部署的处置」，确认后仍以 ERROR 级逐条留痕（不静默），但不再拦启动。
     # 非生产环境不受此约束——本地/演示链路必须能直接起。
     COMPLIANCE_DECISIONS_ACK: bool = False
@@ -163,25 +163,7 @@ class Settings(BaseSettings):
     COS_REGION: str = "ap-guangzhou"
     COS_BUCKET: str = ""
     COS_CDN_DOMAIN: str = ""
-    # 腾讯云短信 SMS
-    # 【未接线·全库无任何消费方】手机号验证码登录未建。下面五项只存于配置：既无短信
-    # 客户端、也无发送/校验端点，前端也没有手机号登录入口（web/ 里的 phone 只出现在
-    # 后台搜索框占位符与用户列表展示）。users.phone 列同样从未被写入过真实值
-    # （全库只有注销时置 None 一处）。按本次清理口径，未建成的计划功能只标记不删；
-    # 若确定不做手机号登录，这五项连同 users.phone 列、后台的用户搜索与展示可一并下掉。
-    TENCENT_SMS_SECRET_ID: str = ""
-    TENCENT_SMS_SECRET_KEY: str = ""
-    TENCENT_SMS_SDK_APP_ID: str = ""
-    TENCENT_SMS_SIGN_NAME: str = ""
-    TENCENT_SMS_TEMPLATE_ID: str = ""
     # 业务
-    # 【未接线·core 不消费这两个键】结果缓存的「复用判定」属第三方调用策略，只有真正调
-    # 外部接口的业务插件才有权决定同参数是否复用；core 侧只做两件与它们无关的事：
-    # tasks/scheduler.py 按 result_cache.expire_at 清理过期行、api/user.py 随账号注销删除。
-    # 待接线说明：插件若需要统一的复用口径，应在此接入点读取本开关并写 expire_at，
-    # 否则不要依赖它们——现在改这两个值不改变任何行为。
-    RESULT_CACHE_ENABLED: bool = True
-    RESULT_CACHE_DAYS: int = 30
     ORDER_TIMEOUT_MINUTES: int = 30
     REFUND_DAYS: int = 7
     # ===== 支付主动查单 / 掉单补偿 =====
@@ -252,14 +234,9 @@ class Settings(BaseSettings):
     INVOICE_ITEM_NAME: str = "*信息技术服务*信息系统服务费"
     # 前端静态资源目录（同源托管，前端纯展示、不存数据）；留空则不托管（生产由 nginx 提供）
     WEB_ROOT: str = ""
-    # 【未接线·无代码读取本键】原意是「默认不替使用者播种垂直业务商品」，但实际种子
-    # 只有 main._seed_base_data 一处（播会员档位），插件自己的 seed_data 钩子无条件执行，
-    # 因此这个开关从未生效。要控制插件商品的播种请在插件的 seed_data 内自行判定，
-    # 别改本键——改 true/false 都不改变任何行为。
-    SEED_VERTICAL_PRODUCTS: bool = False
     # 第五十六条第3款：支付前免责勾选的服务端闸门开关。
-    # 此前 DOC_PAYMENT_DISCLAIMER 只由前端写留痕、下单路径不校验（不勾也能付款）。
-    # 置 True 后 order.create 在年龄门槛之后调用 distribution_compliance.has_signed
+    # 目前 DOC_PAYMENT_DISCLAIMER 只由前端写留痕、下单路径不校验（不勾也能付款）。
+    # 置 True 后 order.create 调用 distribution_compliance.has_signed
     # 校验用户是否已签署支付免责，未签即拒单。
     # 默认 False 保持兼容：通用底座的占位前端没有签署 UI，无条件强制会导致上线即全员
     # 无法下单；运营接好勾选前端（经 POST /consent/sign 端点、doc_type=payment_disclaimer
@@ -274,9 +251,8 @@ class Settings(BaseSettings):
     # 档位名属业务侧文案，底座只给中性默认值；垂直业务可覆盖。
     MEMBERSHIP_TIER_NAME: dict = {"month": "月卡会员", "year": "年卡会员", "lifetime": "终身会员"}
     # 档位 SKU 单一来源：既是 _seed_base_data 播种的商品码，也是 membership.level_of_sku
-    # 的反查兜底。此前种子钩子把 vip_month/vip_year/vip_lifetime 写死在 main.py 里，而
-    # level_of_sku 只认插件 manifest.membership_skus——接入的业务插件不声明会员档时，
-    # 用户买下底座档位会在履约处抛 ValueError(非会员SKU)：钱已收、会员没到、订单卡住。
+    # 的反查兜底。level_of_sku 必须同时识别本表与插件 manifest.membership_skus；
+    # 任一侧脱钩都会在履约处抛 ValueError(非会员SKU)，导致钱已收、会员没到。
     # 垂直业务若用别的码，在插件 manifest 声明 membership_skus（优先于本表）并覆盖本表。
     MEMBERSHIP_TIER_SKUS: dict = {"month": "vip_month", "year": "vip_year",
                                   "lifetime": "vip_lifetime"}
@@ -334,20 +310,8 @@ class Settings(BaseSettings):
     DIST_ATTRIBUTION_WINDOW_DAYS: int = 90
     # --- 提现风控（第三十条）：每自然日最多 2 次，00:00 重置；非推广员原因失败返还当次次数 ---
     WITHDRAW_DAILY_LIMIT: int = 2
-    # --- 合规入门考试（第七条）：满分 100、80 及格、不限次数 ---
-    # 运营决策：合规考试先停用——DIST_EXAM_ENABLED=False 时不作为计佣/解冻门禁、前端不再提示，
-    # 题库/记录/端点保留闲置；将来置 True 即恢复第七条“未通过不予推广资格”硬门禁。
-    DIST_EXAM_ENABLED: bool = False
-    DIST_EXAM_PASS_SCORE: int = 80
-    DIST_EXAM_FULL_SCORE: int = 100
     # --- 违规冻结（第六十条中度违规）：冻结 7 天，冻结期佣金不结算、链接暂停新增绑定、新订单不计业绩 ---
     DIST_FREEZE_DAYS: int = 7
-    # 【未接线·全库无任何读取方】第五十九条：承诺书/考试/勾选/处置记录留痕不少于 3 年。
-    # 该年限目前只写在这里：没有任何清理任务或查询引用它（distribution_compliance.py 只在
-    # 模块 docstring 里提了一句）。法定保存义务并未因此落空：compliance_consents 从不删行，
-    # 撤回一律是追加 agreed=0，留痕事实上永久保留。保留本字段是为了把法定期限固化在
-    # 配置里；将来若真要加「超期归档/清理」任务，必须以本值为下限，且不得删除留痕行本身。
-    DIST_CONSENT_RETENTION_YEARS: int = 3
     # 管理后台
     ADMIN_TOKEN: str = "change-me-admin-token"
     # 管理后台敏感操作二次密码（留空则不强制，生产强烈建议配置）
@@ -367,15 +331,6 @@ class Settings(BaseSettings):
     # 正常用户一次支付/建档最多触发两三次勾选，10 次/分钟已远超真实用量。
     RATE_LIMIT_CONSENT_PER_MIN: int = 10       # 每用户每分钟合规留痕写入次数
     RATE_LIMIT_TOUCH_PER_HOUR: int = 60        # 每 IP 每小时推广触达上报次数（公开端点，防刷表）
-    # ===== 第三方计费接口全局限流 =====
-    # 用户级限流可被「注册大量账号」的多账号放大器绕过（每账号都拿到自己的配额），
-    # 叠加一层按 IP 的全局限流，防止一次性打爆第三方付费 API 预算。
-    # 仅叠加在用户级限流之上；配合 TRUST_PROXY_HEADERS=true（nginx 反代覆写 X-Real-IP）时
-    # 按真实公网 IP 计数，直连部署则按 TCP 对端 IP 计数。
-    # 【未接线·无代码读取本键】上面那段「按 IP 叠一层全局限流」的设计尚未落地：
-    # 现有限流都是按端点各自取 RATE_LIMIT_* 键，没有任何调用点读这个总闸。
-    # 待接线说明：在计费类路由上以 f"tp:{ip}" 为键统一计数后再启用，否则别依赖它。
-    RATE_LIMIT_TP_GLOBAL_PER_MIN: int = 60     # 每 IP 每分钟第三方计费接口调用总上限
     # 会员配额不在此配置：由 services/quota.py 统一承接
     # （各能力共享周期总池 + 单能力单日上限，额度取自 membership.quota_conf(level)）。
     # 新增能力配额请改 quota_conf，不要再按功能分设同类字段。
@@ -387,10 +342,9 @@ class Settings(BaseSettings):
     def database_url(self):
         """返回 SQLAlchemy URL 对象（而非拼接串）。
 
-        原实现用 f-string 把 DB_PASSWORD 拼进连接串，
-        create_engine 收到的字符串在连接失败时会原样进入异常文本/日志/APM/监控，
-        等于把库密码写进每一条排障信息。改用 URL.create 后，engine.url 的默认
-        repr/str 会把密码渲染为 ***（SQLAlchemy 内建掩码），连接行为完全等价
+        使用 URL.create 而不是把 DB_PASSWORD 拼进连接串，避免数据库密码随连接
+        失败信息进入异常文本、日志和监控。engine.url 的默认 repr/str 会把密码
+        渲染为 ***（SQLAlchemy 内建掩码），连接行为完全等价
         （create_async_engine 内部本就是把字符串解析成同款 URL 对象）。
         charset 经 query 传入，与旧串尾 ?charset=utf8mb4 等效。"""
         from sqlalchemy.engine import URL
@@ -420,7 +374,7 @@ class Settings(BaseSettings):
         """是否按生产环境处理（安全红线的唯一判定入口）。
 
         启动自检、CORS 是否允许 *、模拟支付是否放行三处必须共用本属性；
-        此前各处各写一份 APP_ENV == "production"，任何一处漏改就等于留了裸奔口子。
+        各处自行比较 APP_ENV 字符串容易漏改，并留下生产环境裸奔入口。
         默认按生产处理 = 拼写错误（"Product"/"Prod"/"produciton"）与未配置
         等价于 production，行为正确。但运维侧可能在 staging/test 上线时拼错而误以为
         进了非生产模式，特在此打 WARNING 提示「APP_ENV 未命中已知非生产值，将按生产处理」。

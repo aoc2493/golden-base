@@ -65,17 +65,12 @@ EMAIL_SMTP_FROM=<发件地址>
   照抄示例文件上不了线。
 - `REQUIRE_EMAIL_VERIFICATION=true`（默认）时生产环境必须配置 SMTP，否则注册邮箱只是
   自报字符串，启动自检会直接拒绝。
-- 三项法定义务控制默认按「开箱可用」关闭，而生产环境要求有人显式确认过才允许启动：
+- 两项法定义务控制默认按「开箱可用」关闭，而生产环境要求有人显式确认过才允许启动：
   先逐项判断本部署的处置，再在 `.env` 写明 `COMPLIANCE_DECISIONS_ACK=true`；
   未确认时启动自检把当前仍关闭的项列为阻断项（拒绝启动），确认后每次启动仍以 ERROR 级
   逐条留痕。可选的处置：
   `ENFORCE_PAYMENT_DISCLAIMER=true`（支付前免责勾选的服务端校验，需前端先接签署 UI）、
   `WITHDRAW_TAX_ENABLED=true`（佣金提现代扣个税，税率见 `WITHDRAW_TAX_RATE`）。
-- 年龄门槛（成年声明 / 监护人同意）在本底座里恒放行（`minor_guard` 不做拦截）；
-  这条决定不在 `.env` 里（刻意不做成开关：法定义务做成配置项，一次改动就能静默关掉且不留痕），
-  重新打开要改 `app/core/services/minor_guard.py` 的 `gate_payer` / `gate_bio`，
-  判据（周岁推算、农历换算、留痕）都已实现并有测试。若业务可能触达未成年人，
-  需在运营侧另做限制或把门槛打开。
 
 ## 3. 部署
 

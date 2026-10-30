@@ -59,9 +59,6 @@ class DemoService:
     def generation_task(self):
         return None
 
-    def lunar_converter(self):
-        return None
-
     def vip_benefits(self) -> list:
         return []
 

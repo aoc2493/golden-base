@@ -53,7 +53,7 @@ def days_for_level(level: str) -> Optional[int]:
 
 
 def quota_conf(level: str) -> dict:
-    """该档位的额度配置；未知档位返回全0（不放行任何测算）。"""
+    """该档位的额度配置；未知档位返回全0（不放行任何业务请求）。"""
     return settings.MEMBERSHIP_QUOTA.get(level, {"period_days": 0, "period_total": 0,
                                                  "daily_per_tool": 0, "archive_limit": 0})
 
@@ -110,9 +110,8 @@ async def get_member_status(db: AsyncSession, user_id: int, now: Optional[dateti
     check_feature -> is_vip 的每次鉴权热路径上，而额度统计要多跑一次 COUNT；
     需要展示额度的调用方（GET /membership/status）显式传 with_usage=True 换取。
 
-    原实现从不给 period_used 赋值：base 恒为 0，两个 is_vip 分支都只是 {**base, ...}
-    覆盖其他字段，于是所有会员的「本周期已用 / 总额度」永远显示 0/N——用户看不到额度
-    消耗，被拦（QUOTA_EXCEEDED）时更无从判断撞的是周期总池还是单工具单日上限。
+    使用真实用量时必须给 period_used 赋值，否则会员的「本周期已用 / 总额度」会
+    恒显示为 0/N，用户被拦（QUOTA_EXCEEDED）时无法判断撞的是周期总池还是单日上限。
     """
     now = now or datetime.now()
     m = await get_membership(db, user_id)
@@ -221,7 +220,7 @@ async def card_redeem_block_reason(db: AsyncSession, user_id: int, sku_code: str
     if not m or m.level == "none":
         return ""
     if m.level == "lifetime":
-        # 原先对「终身会员 + 终身卡」
+        # 当前对「终身会员 + 终身卡」
         # 直接放行（return ""），而 grant_membership 的终身分支每次发放都会重新
         # _reset_period（period_start=now、赠送额度清零）；可终身卡对终身会员**没有任何
         # 新增权益**（档位与到期日均不变），于是这次兑换唯一的效果就是「把 365 天额度
@@ -262,8 +261,8 @@ def _reset_period(m: UserMembership, now: datetime, level: str):
     m.bonus_used = 0
 
 
-async def grant_membership(db, user_id, sku_code, order_no, days=None, order_id=None,
-                           pay_amount=None) -> UserMembership:
+async def grant_membership(db, user_id, sku_code, order_no, days=None,
+                           order_id=None) -> UserMembership:
     """支付成功后发放会员（方案B：全价 + 剩余叠加顺延）。自动区分 新购 / 续费 / 升级：
     - 无有效会员 / 宽限期恢复 → 新购：自支付时刻起算（旧到期日已失效，base=now）
     - 有效会员买更高档 → 升级：按新档全价，到期日在旧卡剩余之上顺延叠加新档天数（不折算差价）
@@ -313,16 +312,16 @@ async def grant_membership(db, user_id, sku_code, order_no, days=None, order_id=
         in_grace_now = bool(grace_deadline and grace_deadline > now)
         base = m.expire_at if (m.expire_at and (m.expire_at > now or in_grace_now)) else now
         #
-        # 降档保护：当前会员仍有效（未到期，或在宽限期内）且档位高于本次发放档位时，
-        # 绝不能把 level 降下来。admin_grant_membership 早已有同样判断，但本函数——
-        # 「支付到账」与「卡密兑换」两条真实资损路径的唯一发放口——漏掉了：
+        # 降档保护：当前会员仍有效（未到期，或在宽限期内）且档位高于该次发放档位时，
+        # 绝不能把 level 降下来。本函数是「支付到账」与「卡密兑换」两条真实资损路径的
+        # 唯一发放口，必须与 admin_grant_membership 使用同样的降档保护：
         #   · 卡密兑换完全不经过 assert_can_buy（它只在下单那一刻校验），终身会员兑一张
         #     vip_month 卡，level 会被由 lifetime 覆盖成 month、expire_at 由 NULL 变成
         #     +30 天，终身资格不可逆销毁，额度池同时从 3000/365天 掉到 100/30天；
         #   · 付费路径的下单与到账之间同样有窗口：先下单月卡、期间买了年卡并支付成功，
         #     随后才支付那张月卡单 —— assert_can_buy 在下单时是拦不住的。
-        # 处置：保留高等级档位，只把本次购买的天数顺延叠加到现有到期日；终身档没有到期日
-        # 可顺延，故只保住终身身份（本次购买不加时长，但绝不作废用户既有权益）。
+        # 处置：保留高等级档位，只把该次购买的天数顺延叠加到现有到期日；终身档没有到期日
+        # 可顺延，故只保住终身身份（该次购买不加时长，但绝不作废用户既有权益）。
         # 仍照常写 grant 流水：退款清算依赖台账，档位回退由 rollback_membership 负责。
         if (m.level != "none" and LEVEL_RANK.get(m.level, 0) > LEVEL_RANK[level]
                 and (m.expire_at is None or m.expire_at > now or in_grace_now)):
@@ -385,9 +384,9 @@ async def admin_grant_membership(db, user_id, action, days=None) -> UserMembersh
             m.continuous_flag = 1
             m.rule_version = settings.MEMBERSHIP_RULE_VERSION
             # 与 grant_membership 保持一致——「失效后重开/首次发放」（base==now）必须重起
-            # 额度周期并清零 bonus。原实现漏掉本步，管理员补发月/年卡时会沿用旧的 period_start，
-            # 使额度周期窗口错位（quota.period_window 以 period_start 为锚滚动），且过期会员残留的
-            # bonus_quota/bonus_used 被带入新周期，导致额度显示与扣减都不对。
+            # 额度周期并清零 bonus。管理员补发月/年卡时若沿用旧的 period_start，
+            # 额度周期窗口会错位（quota.period_window 以 period_start 为锚滚动），且过期会员
+            # 残留的 bonus_quota/bonus_used 会带入新周期，导致额度显示与扣减都不对。
             # 「在原到期时刻顺延」的续期（base!=now）不重置，与付费续费的语义一致。
             if base == now:
                 _reset_period(m, now, level)
@@ -485,11 +484,9 @@ async def _period_anchor_from_ledger(db, user_id, exclude_order_id=None) -> Opti
 
     背景：
     grant_membership 在「新购 / 升档 / 宽限期续费」时会经 _reset_period 把 period_start
-    前移（额度周期重起），但 rollback_membership 只还原档位、到期日、赠送额度与连续标记，
-    **从不还原 period_start**。而 quota.period_window 以 period_start 为锚滚动、
-    quota.usage 统计 `created_at >= period_start` —— 锚被前移等于「本周期已消耗次数全部
-    归零」。于是「升年卡 → 用满额度（报告生成但不打开，客服即判未使用）→ 退款」可以白得
-    一个完整年度额度周期，升级期间已消耗的额度也不会被追回。
+    前移（额度周期重起），rollback_membership 还须还原周期锚，避免「升年卡 → 用满额度
+    → 退款」重新获得一个完整年度额度。quota.period_window 以 period_start 为锚滚动，
+    quota.usage 统计 `created_at >= period_start`。
 
     这里按流水时间顺序重放，reset 判定与 grant_membership 完全同一口径：
         reset = 首次开通「前序档位 none」/ 升档 / 宽限期内续费
@@ -541,9 +538,9 @@ async def _revert_period_anchor(db, m, user_id, exclude_order_id) -> None:
     没有推动过周期（同档续费 / 台账缺失的管理员补发），一律不动 —— 这一侧的不动是为了
     不凭不完整台账放宽额度口径。
 
-    典型修复场景：月卡用户用满 100 次 → 升年卡（period_start 被推到此刻，本周期已消耗
+    典型场景：月卡用户用满 100 次 → 升年卡（period_start 被推到此刻，本周期已消耗
     次数全部归零）→ 再用满年卡额度 → 退款年卡。此处把锚推回升级前那一刻，本周期已
-    消耗次数重新计入，白得周期的路径消失。
+    消耗次数重新计入，避免退款获得额外周期。
     """
     anchor = await _period_anchor_from_ledger(db, user_id,
                                               exclude_order_id=exclude_order_id)
@@ -559,7 +556,7 @@ async def _revert_period_anchor(db, m, user_id, exclude_order_id) -> None:
 
 
 async def _remaining_membership_from_ledger(db, user_id, exclude_order_id=None) -> tuple:
-    """推算除本次退款订单外，其他月/年卡到此刻还剩的 (档位, 天数)。
+    """推算除该次退款订单外，其他月/年卡到此刻还剩的 (档位, 天数)。
 
     按流水时间顺序推演：最后一段未作废的有效发放决定档位（月→年演进的最后一档），
     到期时刻由剩余天数推算。返回 (level, days)；无剩余时返回 ("none", 0)。"""

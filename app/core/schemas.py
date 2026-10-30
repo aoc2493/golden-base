@@ -1,22 +1,14 @@
 from pydantic import BaseModel, Field, field_validator
 from typing import Optional, List, Any, Dict
 import json
-import re
 
 
 # ===== 文本字段内容校验 =====
-# 出生信息 / 地名 / 姓名这类字段有三个下游：拼进第三方前置计算接口的表单、被前端渲染、
-# 作为报告数据写入存储并对外展示。原定义只限长度不限内容，留下两类真实问题：
-#   ① province / city 可写入 <svg onload=...> 之类载荷，而前端前置计算确认窗曾把它们
-#      直接拼进 innerHTML，构成存储型 XSS；
-#   ② birth_date 写入非日期串时，第三方接口静默失败，用户只看到「前置计算计算失败」，
-#      排查时也无从判断是参数问题还是接口问题。
-# 日期/时间用格式白名单，其余文本拒绝 HTML 敏感字符——不做完整字符白名单是为了
+# 地名与姓名等展示字段拒绝 HTML 敏感字符——不做完整字符白名单是为了
 # 避免误伤真实地名（如带「·」的少数民族地名），正常文本绝不会出现尖括号与引号。
 # 集合里刻意不含 & ：它既不能开启标签、也不能突破属性，前端 esc() 已把它转成实体，
 # 而它在昵称/备注里是合法字符（如「Tom & Jerry」），一并禁掉属于过度收紧。
 _MARKUP_CHARS = set('<>"\'`')
-_DATE_RE = re.compile(r"^\d{4}-\d{1,2}-\d{1,2}$")
 
 
 def _upload_allowed_hosts() -> set:
@@ -93,15 +85,6 @@ def _reject_markup(v, field_cn: str):
     return s
 
 
-def _check_date(v, field_cn: str):
-    """出生日期必须形如 YYYY-MM-DD（容错非零填充，与第三方接口的解析口径一致）"""
-    if v is None:
-        return None
-    if not isinstance(v, str) or not _DATE_RE.match(v.strip()):
-        raise ValueError(f"{field_cn}格式非法，应为 YYYY-MM-DD")
-    return v.strip()
-
-
 # ===== 认证 =====
 class LoginRequest(BaseModel):
     code: str = Field(..., max_length=64, description="H5设备码，格式 h5-xxx")
@@ -112,7 +95,7 @@ class EmailRegisterRequest(BaseModel):
     email: str = Field(..., max_length=255, description="邮箱")
     password: str = Field(..., min_length=8, max_length=128, description="密码，至少 8 位")
     invite_code: Optional[str] = Field(None, max_length=32, description="邀请码（可选）")
-    # 邮箱验证码：若服务端此前已为该邮箱下发过验证码，则必填且必须匹配（防批量注册/账号枚举）
+    # 邮箱验证码：若服务端目前已为该邮箱下发过验证码，则必填且必须匹配（防批量注册/账号枚举）
     code: Optional[str] = Field(None, max_length=12, description="邮箱验证码（如已下发则必填）")
 
 
@@ -134,7 +117,7 @@ class PasswordResetRequest(BaseModel):
 
 
 class PasswordResetConfirmRequest(BaseModel):
-    """Use a one-time email verification code to set a new password."""
+    """使用邮件一次性验证码设置新密码。"""
     email: str = Field(..., max_length=255)
     code: str = Field(..., min_length=6, max_length=12)
     new_password: str = Field(..., min_length=8, max_length=128)
@@ -184,13 +167,6 @@ class OrderCreateRequest(BaseModel):
     channel: Optional[str] = Field(None, pattern="^(wechat|alipay)$")
     result_ref_id: Optional[int] = None
     biz_data: Optional[Dict[str, Any]] = Field(None, description="业务快照")
-    # 年龄门槛的两项确认标记（services/minor_guard.gate_bio）。
-    # 放在顶层而不是塞进 biz_data：biz_data 会进订单快照并参与 _norm_biz 比对，
-    # 勾选状态一变就会被判为「业务快照已变更」而作废旧单重建，白丢一张待支付订单；
-    # 它也绝不能进 biz_key，否则同一份出生信息会因为一个勾选差异被算成两把钥匙、重复收费。
-    guardian_consent: bool = Field(False, description="未成年人不满14周岁时：我是监护人或已取得监护人同意")
-    third_party_consent: bool = Field(False, description="已阅读他人信息告知并承诺具有合法性基础")
-
     @field_validator("biz_data")
     @classmethod
     def _limit_biz_size(cls, v):
@@ -208,7 +184,7 @@ class RefundRequest(BaseModel):
 
 # ===== 业务入参模型 =====
 # 各业务能力的入参模型不在本文件：由插件 api 内的请求体 + 插件 service 的统一归一校验承接，
-# 相关前置计算 / 准备 / 解读端点全走插件那条路
+# 前置结果与报告端点均由插件提供
 # （order.py 下单时从 biz_data 派生 biz_key 也同样调用插件的归一逻辑）。
 # core 不预置任何业务专属入参模型，新增业务能力请在对应插件内定义。
 
@@ -271,62 +247,9 @@ class AdminPasswordResetRequest(BaseModel):
     operate_password: Optional[str] = Field(None, max_length=64)
 
 
-# ===== 分销 V1.3：用户端合规钩子 =====
-class ExamSubmitRequest(BaseModel):
-    """【未接线·无端点使用本模型】第七条：合规入门考试作答。answers 键为题号（字符串），值为选项标识（单选 "A" / 多选 "A,B"）。
-
-    待接线说明（本次死代码清理仅标记、未改动行为）：配套的
-    services.distribution_compliance.get_exam_paper / submit_exam / get_exam_status
-    三个函数同样无调用点，而后台侧已全部接线（admin.py 的 /admin/exam/questions
-    增改查、列表展示 exam_passed）。考题内容只有后台录入这一条路：
-    init.sql 不预置题目、main.py 也不播种，空库里 exam_questions 就是 0 行。
-    后果：推广员无从参加考试，Distributor.exam_passed 恒为 0，后台展示的
-    「是否通过合规考试」对所有都是否——第七条的考试前置要求目前不生效。"""
-    answers: Dict[str, str] = Field(default_factory=dict, description="{question_id: 'A' 或 'A,B'}")
-
-    @field_validator("answers")
-    @classmethod
-    def _limit_answers(cls, v):
-        if not v:
-            return {}
-        if len(v) > 200:
-            raise ValueError("作答条目过多")
-        out = {}
-        for k, val in v.items():
-            if not isinstance(val, str):
-                raise ValueError("作答格式非法")
-            s = val.strip()
-            if len(s) > 40:
-                raise ValueError("作答内容过长")
-            out[str(k)] = s
-        return out
-
-
 # 合规文书类型白名单（与 services/consent.CONSENT_ITEMS 一一对应）。
-# 写在模块级而不在两个 Request 里各抄一份：两边抄必然走偏（新增一类授权时只改了一处，
-# 另一处会把合法请求拦成 422）。新增的三类（成年声明/监护人同意/他人出生信息告知）
-# 必须一并登记，否则「隐私授权管理」页上可撤回项的「重新同意」按钮会被 422 拦死。
 CONSENT_DOC_TYPES = ("^(privacy_policy|promoter_commitment|payment_disclaimer|rule_change"
-                     "|adult_declaration|guardian_consent|third_party_bio)$")
-
-
-class AgeDeclarationRequest(BaseModel):
-    """成年声明（自报公历出生日期，服务端据此推算周岁）。
-
-    【接线状态】无调用点：它服务的 POST /api/user/age-declaration 已随年龄门槛整体关闭下架
-    （见 api/user.py），故 FastAPI 也不会把它收进 /docs。保留是为了重新开启门槛时不必重设计
-    入参口径——下面的「只收出生日期、不收年龄布尔值」是法定证据口径，不是可以随手改的表单细节。
-
-    只收出生日期，不收「我已成年」布尔值也不收年龄数字：客户端自述的年龄在争议中不构成
-    任何证明，而出生日期可以反复推算、可与留痕时点对账。
-    只收公历（不提供历法选择）：农历自报年龄无法向监管复现，且换算依赖天文计算，
-    把一个法定门槛建在可失败的换算上不值得。"""
-    birth_date: str = Field(..., max_length=20, description="本人公历出生日期 YYYY-MM-DD")
-
-    @field_validator("birth_date")
-    @classmethod
-    def _v_date(cls, v):
-        return _check_date(v, "出生日期")
+                     ")$")
 
 
 class ConsentSignRequest(BaseModel):
@@ -348,70 +271,13 @@ class ConsentWithdrawRequest(BaseModel):
     doc_type: str = Field(..., pattern=CONSENT_DOC_TYPES)
 
 
-class ExternalAccountReportRequest(BaseModel):
-    """【未接线·无端点使用本模型】第五十条：外部推广账号报备（用于商业推广的抖音/快手/小红书等账号）。
-
-    待接线说明（本次死代码清理仅标记、未改动行为）：配套的
-    services.distribution_compliance.report_external_account 无调用点，而后台侧已接线
-    （admin.py 的 /admin/external-accounts 列表与 /{id}/review 审核）。
-    后果：推广员无法提交报备，后台那张审核列表永远是空的，第五十条的报备义务
-    目前无从履行。"""
-    platform: str = Field(..., min_length=1, max_length=30)
-    account_name: str = Field(..., min_length=1, max_length=100)
-    account_url: Optional[str] = Field(None, max_length=255)
-    remark: Optional[str] = Field(None, max_length=200)
-
-    @field_validator("account_url")
-    @classmethod
-    def _v_url(cls, v):
-        # 与 UserUpdateRequest.avatar_url 同口径：仅允许 http(s)，拒伪协议（后台会渲染成可点链接）
-        if v is None:
-            return None
-        if not isinstance(v, str):
-            raise ValueError("账号链接格式非法")
-        s = v.strip()
-        if not s:
-            return None
-        if len(s) > 255:
-            raise ValueError("账号链接过长")
-        if any(ord(c) < 32 or ord(c) == 127 for c in s):
-            raise ValueError("账号链接含非法字符")
-        if not s.lower().startswith(("http://", "https://")):
-            raise ValueError("账号链接协议非法")
-        return s
-
-
-class ReportTicketCreateRequest(BaseModel):
-    """【未接线·无端点使用本模型】第五十八条第3款：用户举报（可匿名，平台24h内响应核查反馈）。
-    content 为自由文本，与 FeedbackRequest.content 同口径仅限长度、由后台渲染时转义。
-
-    待接线说明（本次死代码清理仅标记、未改动行为）：配套的
-    services.distribution_compliance.create_report_ticket 无调用点，而后台侧已接线
-    （admin.py 的举报工单列表 / respond / handle）。后果：用户无法发起举报，
-    工单表永远为空，后台的「24h 内响应」处置链路无从触发，第五十八条第3款的
-    举报受理义务目前不生效。"""
-    content: str = Field(..., min_length=1, max_length=2000)
-    target_distributor_id: Optional[int] = None
-    target_type: Optional[str] = Field("distributor", pattern="^(distributor|content|order)$")
-    evidence: Optional[Dict[str, Any]] = None
-    contact: Optional[str] = Field(None, max_length=100)
-
-    @field_validator("evidence")
-    @classmethod
-    def _limit_evidence(cls, v):
-        if v is not None and len(json.dumps(v, ensure_ascii=False)) > 4096:
-            raise ValueError("证据信息过大")
-        return v
-
-
-# ===== 分销 V1.3：管理端违规处置 / 举报 / 外部账号 / 敏感词 / 题库 / 排行结算 =====
+# ===== 管理端违规处置、敏感词与排行结算 =====
 class AdminViolationRequest(BaseModel):
     """第六十条：违规分级处置。minor警告整改/moderate冻结7天降级/severe永久清退/illegal涉嫌违法冻结。"""
     level: str = Field(..., pattern="^(minor|moderate|severe|illegal)$")
     reason: str = Field(..., min_length=1, max_length=500)
     order_id: Optional[int] = Field(None, description="涉违规订单（扣该订单佣金）")
     evidence: Optional[Dict[str, Any]] = None
-    report_ticket_id: Optional[int] = Field(None, description="关联举报工单")
     operate_password: Optional[str] = Field(None, max_length=64, description="敏感操作二次密码")
 
     @field_validator("evidence")
@@ -435,20 +301,6 @@ class AdminLinkRequest(BaseModel):
     operate_password: Optional[str] = Field(None, max_length=64, description="敏感操作二次密码")
 
 
-class AdminReportHandleRequest(BaseModel):
-    """第五十八条：举报工单处置。respond首次响应(0->1)/handle已处置(->2)/reject驳回(->3)。"""
-    action: str = Field(..., pattern="^(respond|handle|reject)$")
-    handle_result: Optional[str] = Field(None, max_length=500)
-    operate_password: Optional[str] = Field(None, max_length=64, description="敏感操作二次密码")
-
-
-class AdminExternalReviewRequest(BaseModel):
-    """第五十条：外部账号报备审核。status 1=通过/2=拒绝。"""
-    status: int = Field(..., ge=1, le=2)
-    remark: Optional[str] = Field(None, max_length=200)
-    operate_password: Optional[str] = Field(None, max_length=64, description="敏感操作二次密码")
-
-
 class AdminSensitiveWordRequest(BaseModel):
     """第五十七/五十八条：敏感词维护（word 唯一）。level 1=一级拦截/2=二级预警。"""
     word: str = Field(..., min_length=1, max_length=50)
@@ -456,31 +308,6 @@ class AdminSensitiveWordRequest(BaseModel):
     category: Optional[str] = Field(None, max_length=50)
     enabled: int = Field(1, ge=0, le=1)
     operate_password: Optional[str] = Field(None, max_length=64, description="敏感操作二次密码")
-
-
-class AdminExamQuestionRequest(BaseModel):
-    """第七条：考试题库维护。传 id 则更新、不传则新增。qtype single单选/multiple多选/judge判断。"""
-    id: Optional[int] = Field(None, description="传入则更新该题，不传则新增")
-    category: Optional[str] = Field(None, max_length=50)
-    content: str = Field(..., min_length=1, max_length=500)
-    options: Optional[List[str]] = Field(None, description="选项数组，如 ['A.xxx','B.yyy']")
-    answer: str = Field(..., min_length=1, max_length=20, description="单选存选项标识，多选逗号分隔")
-    qtype: str = Field("single", pattern="^(single|multiple|judge)$")
-    score: int = Field(10, ge=1, le=100)
-    sort_order: int = Field(0, ge=0)
-    enabled: int = Field(1, ge=0, le=1)
-    operate_password: Optional[str] = Field(None, max_length=64, description="敏感操作二次密码")
-
-    @field_validator("options")
-    @classmethod
-    def _limit_options(cls, v):
-        if v is None:
-            return None
-        if len(v) > 10:
-            raise ValueError("选项过多")
-        if len(json.dumps(v, ensure_ascii=False)) > 4096:
-            raise ValueError("选项内容过大")
-        return v
 
 
 class AdminRankSettleRequest(BaseModel):
@@ -513,10 +340,10 @@ class AdminReconcileRunRequest(BaseModel):
 class AdminCryptoBackfillRequest(BaseModel):
     """把存量的明文敏感字段（提现实名/收款人姓名/收款账号）补加密。
 
-    幂等：已带 enc:v1: 前缀的行跳过，重复调用不会双重加密。limit 限本次处理行数，
+    幂等：已带 enc:v1: 前缀的行跳过，重复调用不会双重加密。limit 限该次处理行数，
     分次跑完而不是一次扫全库：单次请求跑十分钟会撞上网关超时，而且把整库收款账号
     一次读进内存本身就是敏感信息的一次大面积暴露。"""
-    limit: Optional[int] = Field(2000, ge=1, le=20000, description="本次最多处理的行数")
+    limit: Optional[int] = Field(2000, ge=1, le=20000, description="该次最多处理的行数")
     operate_password: Optional[str] = Field(None, max_length=64, description="敏感操作二次密码")
 
 
@@ -607,7 +434,7 @@ class AdminComplianceAssessmentRequest(BaseModel):
 
     # scope_desc/finding/measures/opinion 是长文本，不走 _reject_markup：它一并禁掉换行与
     # 引号，而分段与「原文引用」在合规意见里是正当写法（与 AdminViolationRequest.reason、
-    # ReportTicket.content 同一口径）。注入面在渲染侧堆死：后台面板对每个字段一律 esc()。
+    # FeedbackRequest.content 同一口径）。注入面在渲染侧关闭：后台面板对每个字段一律 esc()。
 
     @field_validator("measures", "opinion")
     @classmethod

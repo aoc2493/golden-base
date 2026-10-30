@@ -2,7 +2,7 @@
 -- 0004：orders 的用户侧列表改为复合索引（消除 filesort）
 --
 -- 背景：GET /api/order/list 是 `WHERE user_id=? [AND status=?] ORDER BY created_at DESC
--- LIMIT n`。原先只有单列 ix_orders_user_id：定位到该用户的行之后仍要回表 + filesort，
+-- LIMIT n`。当前只有单列 ix_orders_user_id：定位到该用户的行之后仍要回表 + filesort，
 -- 订单数是全库增长最快的一张表，重度用户的「我的订单」翻页会随订单量线性变慢。
 -- 复合 (user_id, created_at) 的最左前缀就是 user_id，所以只按 user_id 过滤的查询
 -- （后台列表、退款/权益反查）照用同一条索引，单列索引成了冗余，一并删掉。

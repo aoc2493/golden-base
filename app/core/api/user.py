@@ -16,7 +16,6 @@ from app.core.api.common import (success, error, ErrorCode, get_client_ip, redis
 from app.config import settings
 from app.plugins import registry
 from app.core.services import consent as consent_svc
-from app.core.services import minor_guard as guard_svc
 from app.core.services import distribution_compliance as compliance_svc
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -34,8 +33,8 @@ _IDENT_MAX_LEN = 64
 
 def _archive_ident(value: str, suffix: str) -> str:
     """注销时归档身份标识以释放唯一约束，并保证结果不超列长。
-    原实现直接拼接归档后缀：LoginRequest.code 允许 64 字符，拼上 23 字符后缀就到 87，
-    MySQL 下报 1406 Data too long，整个注销事务失败（用户永远无法注销）；
+    不能直接拼接归档后缀：LoginRequest.code 允许 64 字符，拼上 23 字符后缀就到 87，
+    MySQL 下报 1406 Data too long，整个注销事务失败；
     SQLite 不校验长度会静默写入超长值，直到迁库时才集中爆发。
     超长时截断前缀、保留尾部时间戳+随机段，既守住列长又维持唯一性。"""
     if not value:
@@ -111,7 +110,7 @@ async def sign_consent(req: ConsentSignRequest, request: Request,
     # ① doc_version 不采信客户端自报——伪造高版本号会污染 latest_agreed_version 的
     #    版本比对语义（留痕表按版本号判定生效状态），一律服务端写入当前生效版本；
     # ② order_id 必须归属当前用户，防止把同意留痕挂到他人订单上破坏证据链。
-    doc_version = guard_svc.GUARD_VERSION
+    doc_version = consent_svc.DOCUMENT_VERSIONS.get(req.doc_type)
     order_id = req.order_id
     if order_id is not None:
         o = (await db.execute(select(Order).where(Order.id == order_id))).scalar_one_or_none()
@@ -146,12 +145,6 @@ async def withdraw_consent(req: ConsentWithdrawRequest, request: Request,
     return success({"doc_type": req.doc_type, "agreed": False, "effect": msg}, msg="已撤回同意")
 
 
-# ==================== 年龄门槛与未成年人保护 ====================
-# 成年声明 / 他人出生信息告知两道门槛前后端一起关闭，
-# /age-gate 与 /age-declaration 两个接口随之下架（前端已无任何调用点）；
-# services/minor_guard.gate_payer / gate_bio 恒放行，下单/计算/建档链路不再拦截。
-
-
 @router.delete("/account")
 async def delete_account(credentials: HTTPAuthorizationCredentials = Depends(security),
                          db: AsyncSession = Depends(get_db),
@@ -163,7 +156,7 @@ async def delete_account(credentials: HTTPAuthorizationCredentials = Depends(sec
         if Decimal(str(dist.available_commission or 0)) > 0 or Decimal(str(dist.pending_commission or 0)) > 0:
             return error(ErrorCode.NO_PERMISSION, "账户尚有未结算或可提现佣金，请先提现或联系客服")
         # 必须用 scalars().first()：withdrawals 在 (user_id, status) 上没有任何唯一约束，
-        # 同一用户存在两笔 auditing 是可能的（apply_withdrawal 修复前的并发穿透就造成过
+        # 同一用户存在两笔 auditing 是可能的（apply_withdrawal 异常状态的并发穿透就造成过
         # 这种脏数据）。scalar_one_or_none() 命中多行会抛 MultipleResultsFound，
         # 注销接口从此永久 500 —— 用户再也无法注销账号（同类缺陷）。
         wd = (await db.execute(select(Withdrawal).where(
@@ -179,7 +172,7 @@ async def delete_account(credentials: HTTPAuthorizationCredentials = Depends(sec
     await registry.erase_user_data(user, db)
     await db.execute(delete(Favorite).where(Favorite.user_id == user_id))
     await db.execute(delete(ResultCache).where(ResultCache.user_id == user_id))
-    # 订单/退款为财务凭证不删除，仅清空出生信息隐私
+    # 订单/退款为财务凭证不删除，仅清空业务隐私快照
     await db.execute(Order.__table__.update().where(Order.user_id == user_id)
                      .values(input_snapshot=None, result_ref_id=None, biz_data=None))
     # 推广员冻结（status=0）而非物理删除，保留佣金流水用于对账与退款冲回
@@ -201,18 +194,12 @@ async def delete_account(credentials: HTTPAuthorizationCredentials = Depends(sec
     user.status = 2
     user.nickname = None
     user.avatar_url = None
-    user.phone = None
     # 双向定位：「最近登录标识」属个人信息，注销时随其他个人信息一并置空。
     # user_identities 台账保留原标识（与订单/退款不删同一口径）：开票与财务凭证的
     # 法定留存要求下，历史订单快照 login_id_value 必须仍能反查到账号归属；
     # 订单上的快照列也不清（它和 order_no/amount 一样是财务凭证的一部分）。
     user.last_login_type = None
     user.last_login_value = None
-    # 自报出生日期属个人信息，注销时随其他个人信息一并置空。
-    # 「该账号曾在 T 时点完成过成年声明、文本版本为 V」这件事由 compliance_consents 留痕保留
-    # （法定留痕不得删），监管要看的是平台履行了门槛义务，而不是那个具体日期。
-    user.declared_birth_date = None
-    user.age_declared_at = None
     # 当前 token 拉黑 + 用户级全设备拉黑
     if credentials:
         try:

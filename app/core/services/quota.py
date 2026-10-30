@@ -1,26 +1,9 @@
 # -*- coding: utf-8 -*-
-"""会员周期额度统计与判定。
+"""会员周期额度统计、判定与消费记账。
 
-模型（额度取自 settings.MEMBERSHIP_QUOTA，按档位给周期总池与单工具单日上限）：
-  · 周期总额度 = 该档全部会员工具共享的一个总池；
-  · 单工具单日上限 = 独立限制，每日 00:00 重置；
-  · bonus_quota 赠送额度：优先扣减、周期/到期清零；
-  · 一次消费同时占用「周期总池 1 次」与「该工具当日 1 次」，两者都有余量才放行。
-
-事实来源是订单表：会员每消费一次就多一张 pay_channel='member' 的 0 元消费单，
-复用出口提前 return、绝不建单，所以「本周期有几张有效会员单」== 「本周期调用了几次」。
-生成失败的单（reports.status='failed'）计数时排除——平台侧失败不该占用户额度。
-
-为什么不用 Redis 计数：单机/开发环境常无 Redis，降级放行会让配额形同虚设。
-并发：计数落在订单表，「判定」与「建单」不是同一条语句，必须靠临界区串行化——
-锁按用户归一（额度是用户级资源，按内容/结果归一则同一用户并发提交 N 份不同结果
-即可各拿一把锁、各读到同一个旧计数、各建单成功，额度被整倍穿透，而不是「至多超 1 次」）；
-抢到锁后必须换掉 RR 读快照，且先提交再放锁，否则下一个持锁者读不到本次建单。
-
-【接线状态】usage() 是活的（membership.get_member_status 用它算「本周期已用」）；
-consume()/charge_member_view() 这套「判定 + 建 0 元消费单 + 加锁」的写路径全库无调用点：
-底座不含需要按次扣额的业务端点，接入此类能力的插件必须自己走 charge_member_view，
-或在读侧只用 usage() 自行判定。改这里前先确认你的插件真的调到了它。
+业务插件按次扣额时调用 ``charge_member_view``；读取使用量时调用 ``usage``。
+额度事实以 ``pay_channel='member'`` 的 0 元订单为准，并使用用户级互斥锁保证
+计数与建单在并发下保持一致。
 """
 import json
 import logging
@@ -88,7 +71,7 @@ async def usage(db: AsyncSession, user_id: int, sku_view: str,
 
 async def consume(db: AsyncSession, user_id: int, sku_view: str, order_id: int,
                   now: Optional[datetime] = None) -> Tuple[bool, str]:
-    """判定本次会员测算是否放行。返回 (是否放行, 拒绝原因)；原因取 "daily"/"period"/""。
+    """判定该次会员请求是否放行。返回 (是否放行, 拒绝原因)；原因取 "daily"/"period"/""。
 
     调用时机：新订单已 flush（拿到 order_id）、触发计费接口之前。被拒时由调用方把
     订单置 cancelled（留痕、不计入用量）。非会员/宽限期（is_vip=False）不放行——
@@ -131,13 +114,12 @@ async def sync_bonus_used(db: AsyncSession, user_id: int,
     """把 bonus_used 落库（= min(本周期 period_used, bonus_quota)），供会员卡片展示「赠送额度剩余」。
     赠送次数不计入退款扣费（第四十八条第2款），故需单独记录已用赠送量。
 
-    此前本函数是死代码——旧签名要调用方传 level/period_start/period_end，且末尾用到的
-    get_membership 在本模块没有模块级导入（顶部只导了 get_member_status/quota_conf），一被调用即抛
-    NameError，全库因此零调用点，user_memberships.bonus_used 恒为 0，用户用完赠送次数仍显示满额。
-    现改为自算周期窗口（不再要求调用方传 period），get_membership/period_window 沿用 consume 的
-    函数级导入写法（规避与 membership 的循环导入），并在 charge_member_view 的放行出口调用。
-    仅影响展示：额度判定始终走 consume 的实时 usage()（period_used 对比 capacity = period_total
-    + bonus），从不读 bonus_used，故本函数失败不改变放行/扣减口径。"""
+    自算周期窗口，不需要调用方传 level/period_start/period_end；并在
+    charge_member_view 的放行出口调用。函数级导入 get_membership/period_window
+    可避免与 membership 模块的循环依赖。
+    仅影响展示：额度判定始终走 consume 的实时 usage()（period_used 对比
+    capacity = period_total + bonus），不读 bonus_used。
+    """
     now = now or datetime.now()
     # 函数级导入：get_membership/period_window 定义在 membership，模块级导入会与之循环依赖
     from app.core.services.membership import get_membership, period_window
@@ -156,8 +138,8 @@ async def sync_bonus_used(db: AsyncSession, user_id: int,
     m.bonus_used = min(u["period_used"], bonus)
 
 
-# ============ 会员「轻工具」消费记账（实时测算 / 双人解读） ============
-# 会员消费单 SKU ↔ 对应单次付费 SKU。复用出口必须两者都认：先用单次付费买过该测算/该对出生信息的
+# ============ 会员业务请求消费记账 ============
+# 会员消费单 SKU ↔ 对应单次付费 SKU。先用单次付费买过同一业务键的
 # 用户，升级会员后重看不能因为「只认 vip_*_view」而被重复扣一次额度。
 def _view_to_single():
     # 会员消费 SKU ↔ 单次付费 SKU 映射由插件 manifest 声明、注册表聚合
@@ -193,25 +175,22 @@ async def _reuse_member_view(db: AsyncSession, user_id: int, sku_view: str,
 async def charge_member_view(db: AsyncSession, user: User, sku_view: str, biz_key: str,
                              name: str, redis_client,
                              member_name: Optional[str] = None) -> Tuple[Optional[int], str]:
-    """实时测算/双人解读这类「轻工具」的会员消费记账。返回 (order_id_or_None, reason)。
+    """会员业务请求的消费记账。返回 (order_id_or_None, reason)。
 
     reason 取值：
-      ""                放行。order_id 非空=本次新建会员单（占 1 次额度）；
+      ""                放行。order_id 非空=该次新建会员单（占 1 次额度）；
                         order_id 为 None=命中同 biz_key 的已完成单，属重看，不占额度。
       "daily"/"period"  额度用尽，调用方应回 QUOTA_EXCEEDED。
       "busy"            同一用户的另一笔额度判定正在临界区内，调用方应回 RATE_LIMIT。
 
-    为什么必须建 0 元单：额度的事实来源是订单表（见模块 docstring），不建单就无从计数。
-    这正是本条路径此前的缺口——会员调 /live/gua、/pair/interpretation 只过权益门禁
-    （check_feature 见到 vip 直接放行），既不建单也不判定额度，于是计费接口可被无限调用，
-    平台承担全部成本；而同一工具的单次购买入口又因 MEMBER_COVERED_SINGLE_SKUS 对会员屏蔽，
-    用户连付费口径都对不上。建单后 vip_*_view 已登记在 MEMBER_VIEW_SKUS，自动并入共享总池
-    与单工具单日上限。
+    必须建 0 元单：额度的事实来源是订单表（见模块 docstring），不建单就无从计数。
+    会员业务入口应在调用计费接口前先建单并判定额度，使 vip_*_view 纳入共享总池
+    与单工具单日上限，避免只通过权益门禁而没有额度扣减。
 
     必须在调用计费接口**之前**调用：先建单判定、再调接口，额度用尽的请求才不会照样打出
     一笔第三方费用。接口调用失败时由调用方 cancel_member_view 作废本单、退回额度占用。
 
-    member_name：问测算人姓名，纯展示字段，不入接口、不进 biz_key。
+    member_name：业务主体姓名，纯展示字段，不入接口、不进 biz_key。
     与下单路径 api/order.py 对齐写入 biz_data（名字统一截断到 30 字符再落库：
     strip + 截断到 30 字），便于客服按单核对会员路径与单次付费路径的口径一致。
     空值不写入键，避免把快照里塞出 {"biz_key":..., "member_name":""} 这种无意义噪音。
@@ -231,7 +210,7 @@ async def charge_member_view(db: AsyncSession, user: User, sku_view: str, biz_ke
         if existing:
             return existing, ""
         # 会员路径的 biz_data 与下单路径 api/order.py 口径一致：除 biz_key 外可选写入
-        # member_name（问测算人姓名，纯展示字段），便于客服按单核对。名字归一与下单路径
+        # member_name（业务主体姓名，纯展示字段），便于客服按单核对。名字归一与下单路径
         # 完全相同（截断 [:30]），空值不写键避免 {"biz_key":..., "member_name":""}。
         biz_data = {"biz_key": biz_key}
         if member_name is not None:

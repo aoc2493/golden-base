@@ -140,7 +140,7 @@ def test_unconfirmed_compliance_gaps_block_production(monkeypatch):
     with pytest.raises(RuntimeError) as exc:
         _startup_check()
     msg = str(exc.value)
-    for item in ("ENFORCE_PAYMENT_DISCLAIMER", "WITHDRAW_TAX_ENABLED", "年龄门槛"):
+    for item in ("ENFORCE_PAYMENT_DISCLAIMER", "WITHDRAW_TAX_ENABLED"):
         assert item in msg, f"{item} 未进入阻断项：{msg}"
     assert "COMPLIANCE_DECISIONS_ACK" in msg
 
@@ -152,21 +152,17 @@ def test_acked_compliance_gaps_boot_but_stay_loud(monkeypatch, caplog):
     with caplog.at_level(logging.WARNING):
         _startup_check()
     loud = [r for r in caplog.records if any(k in r.getMessage() for k in
-            ("ENFORCE_PAYMENT_DISCLAIMER", "WITHDRAW_TAX_ENABLED", "年龄门槛"))]
-    assert len(loud) == 3, [r.getMessage() for r in loud]
+            ("ENFORCE_PAYMENT_DISCLAIMER", "WITHDRAW_TAX_ENABLED"))]
+    assert len(loud) == 2, [r.getMessage() for r in loud]
     assert all(r.levelname == "ERROR" for r in loud), [(r.levelname, r.getMessage()) for r in loud]
 
 
-def test_opened_switches_shrink_the_gap_list(monkeypatch, caplog):
-    """打开一项，阻断项就少一条：闸门数的是真实缺口，不是一律拒绝。"""
+def test_opened_switches_remove_compliance_gaps(monkeypatch):
+    """两项控制均开启后，生产合规缺口不再阻断启动。"""
     _prod_no_ack(monkeypatch)
     monkeypatch.setattr(settings, "ENFORCE_PAYMENT_DISCLAIMER", True, raising=False)
     monkeypatch.setattr(settings, "WITHDRAW_TAX_ENABLED", True, raising=False)
-    with pytest.raises(RuntimeError) as exc:
-        _startup_check()
-    msg = str(exc.value)
-    assert "年龄门槛" in msg
-    assert "ENFORCE_PAYMENT_DISCLAIMER" not in msg and "WITHDRAW_TAX_ENABLED" not in msg
+    _startup_check()
 
 
 def test_compliance_gate_does_not_reach_local_runs(monkeypatch):

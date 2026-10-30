@@ -4,7 +4,7 @@ Docker 部署用 sql/init.sql 建表（仅数据卷为空时执行），测试�
 Base.metadata.create_all。两者一旦漂移，生产表结构与代码就不一致，且只在首次部署
 时暴露。这里加两道静态门禁：表名集合、每张表的列名集合都必须完全相同。
 
-只比表名的旧版本曾放过一次真实事故：users 表缺 email/password_hash 两列，
+只比表名的旧版本可能遗漏：users 表缺 email/password_hash 两列，
 表名对得上、测试全绿，直到用户点「邮箱注册」才 500。列级比对才能拦住这类漂移。
 """
 import pathlib
@@ -134,11 +134,10 @@ def test_init_sql_indexes_cover_models():
 def test_bigint_sqlite_patch_is_not_gated_on_main_db(tmp_path):
     """主库配成 MySQL 时，同进程临时建起的 SQLite 库也必须能自增插入。
 
-    起因（CI 真实翻车）：BigInteger→INTEGER 的 SQLite 方言补丁原先写成
-    `if settings.DB_TYPE == "sqlite"`，MySQL 作业里主库是 MySQL 所以补丁不注册；
-    并发用例自己新建的 SQLite 文件库于是拿到 `id BIGINT NOT NULL PRIMARY KEY`——
-    SQLite 里只有 INTEGER 主键才是 rowid 别名，BIGINT 主键不自增，
-    插入直接 `NOT NULL constraint failed: users.id`。
+    BigInteger→INTEGER 的 SQLite 方言补丁会依据模块导入时的主库类型决定是否注册。
+    若仅在主库为 SQLite 时注册，MySQL 作业中新建的 SQLite 文件库会得到
+    `id BIGINT NOT NULL PRIMARY KEY`；SQLite 只有 INTEGER 主键才是 rowid 别名，
+    插入时会出现 `NOT NULL constraint failed: users.id`。
 
     必须在子进程里测：补丁是否在「导入 app.core.database 时」注册，取决于那一刻的
     settings.DB_TYPE；在本进程里 monkeypatch 已经太晚（模块早就导入了），
@@ -163,7 +162,7 @@ async def main():
         ddl = (await conn.execute(text(
             "SELECT sql FROM sqlite_master WHERE name='users'"))).scalar_one()
     async with engine.begin() as conn:
-        await conn.execute(User.__table__.insert().values(phone="13900000099"))
+        await conn.execute(User.__table__.insert().values(nickname="测试用户"))
         row = (await conn.execute(text("SELECT id FROM users"))).scalar_one()
     await engine.dispose()
     if "BIGINT" in ddl.upper():

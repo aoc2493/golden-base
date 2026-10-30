@@ -18,7 +18,6 @@ from app.plugins import registry
 from app.core.services.membership import assert_can_buy
 from app.core.services.payment_sync import sync_order_for_user
 from app.core.services import consent as consent_svc
-from app.core.services import minor_guard as guard_svc
 from app.core.services import distribution_compliance as compliance_svc
 from app.config import settings
 
@@ -46,7 +45,7 @@ def _norm_biz(val) -> dict:
 
 def _same_order_snapshot(existing: Order, *, product_id: int, channel: str, amount,
                          cache_id_val, biz_data: dict, input_snapshot) -> bool:
-    """One definition for reuse checks on both the normal and race-recovery paths."""
+    """普通复用路径与并发冲突恢复路径共用的订单快照判定。"""
     return (
         existing.product_id == product_id
         and existing.pay_channel == channel
@@ -55,38 +54,6 @@ def _same_order_snapshot(existing: Order, *, product_id: int, channel: str, amou
         and _norm_biz(existing.biz_data) == _norm_biz(biz_data)
         and _norm_biz(existing.input_snapshot) == _norm_biz(input_snapshot)
     )
-
-
-def _gate_subjects(input_snapshot, biz_data: dict) -> list:
-    """从本次下单的业务快照里取出全部会被处理的出生信息，交给年龄门槛判定。
-
-    为什么按快照取而不按 SKU 列举：快照是真正会落库并送去生成报告的数据，
-    按 SKU 写白名单则新增一个带出生信息的商品时必须记得改这里，漏改就是门槛少拦一条路径。
-    实时测算/日常工具的快照里没有出生信息，自然返回空列表——不采集出生信息就不需要监护人同意，
-    也不需要他人出生信息告知（两项门槛拦的都是「处理出生信息信息」这个动作）。
-    双人内容（sides）与双人解读（male/female）恒为两人，两人出生信息都要过 <14 岁的判定。
-    """
-    out = []
-    src = input_snapshot if isinstance(input_snapshot, dict) else {}
-    containers = [src]
-    sides = (biz_data or {}).get("sides")
-    if isinstance(sides, list):
-        containers.extend([s for s in sides if isinstance(s, dict)])
-    for k in ("male", "female"):
-        s = (biz_data or {}).get(k)
-        if isinstance(s, dict):
-            containers.append(s)
-    seen = set()
-    for c in containers:
-        bd = str(c.get("birth_date") or "").strip()
-        if not bd:
-            continue
-        item = (bd, str(c.get("calendar_type") or "solar").strip().lower())
-        # 双人内容的 input_snapshot 与 biz_data 是同一个对象，去重避免同一份出生信息重复留痕
-        if item not in seen:
-            seen.add(item)
-            out.append(item)
-    return out
 
 
 # 卡券兑换单的支付渠道标识（与 services.card.CARD_PAY_CHANNEL 一致）。
@@ -98,16 +65,12 @@ CARD_CHANNEL = "card"
 def _self_refund_block(order: Order, report):
     """自助退款资格的唯一判据：返回不可退款的原因文案，None 表示资格通过。
 
-    POST /order/refund 与 /order/list、/order/{id} 的 can_refund 必须共用本函数。
-    三处各写一份的条件曾长期互相矛盾：
-      - 实时测算单（live_once）的交付痕迹在 result_cache 而不在 reports，接口按黑名单式
-        「有报告且已查看才拒绝」判断，等于无条件放行退款：用户看完测算结果（第三方接口
-        已计费、测算结果缓存还留着）再全额退回，可反复下单-查看-退款循环套利；
-        而前端 can_refund 是白名单式「有报告且未查看才允许」，从不显示退款按钮，
-        两端结论完全相反。
-      - 会员 0 元解读单（ensure-report 创建）前端给出退款按钮，接口却因「无实际支付
-        金额」必然拒绝，用户点了只会收到报错，永远退不掉。
-    report 为该订单的 Report 行，可为 None：解读类订单查不到报告行说明报告从未生成
+    POST /order/refund 与 /order/list、/order/{id} 的 can_refund 必须共用本函数，
+    保证「按钮能点 ⟺ 接口放行」。
+      - 实时交付单的交付痕迹在 result_cache 而不在 reports，必须按实际交付形态判断，
+        避免查看后仍可退款并形成下单-查看-退款套利。
+      - 会员 0 元报告单由 ensure-report 创建，不存在真实资金流，退款入口应明确拒绝。
+    report 为该订单的 Report 行，可为 None：报告类订单查不到报告行说明报告从未生成
     （生成任务丢失，见插件报告守卫的自愈逻辑），用户付了钱什么都没拿到，必须放行。
     """
     if order.status != "completed":
@@ -117,7 +80,7 @@ def _self_refund_block(order: Order, report):
     # 交付物不是报告（实时拉取型等）无法据 viewed_at 判断是否已消费，走客服兜底
     if not order_delivers_report(order):
         return "该商品不支持自助退款，可联系客服处理"
-    # 无真实支付流水的订单不存在可退的钱：会员免费生成的 0 元解读单
+    # 无真实支付流水的订单不存在可退的钱：会员免费生成的 0 元报告单
     # （ensure-report 创建，amount=0、pay_channel="member"、pay_trade_no 为空）同样是
     # product_type="single"，不拦住会向支付平台发起无效退款并产生脏退款单。
     # 卡券兑换单（pay_channel='card'）是 0 元权益载体，站内不存在任何真实资金流。
@@ -152,25 +115,16 @@ async def create_order(req: OrderCreateRequest, request: Request,
 
     # 个保法第十五条：已撤回个人信息处理同意的用户不得再发起新的付费处理。
     # 放在限流之后、商品查询之前：限流先拦住刷单，避免撤回校验被当成免费探测接口反复打。
-    # 已成交订单不在此列（包括会员 0 元解读单）：已付钱的内容必须继续交付，
+    # 已成交订单不在此列（包括会员 0 元报告单）：已付钱的内容必须继续交付，
     # 收回已收款订单的履约比隐私问题更严重；彻底停止处理的路径是注销账号。
     deny = await consent_svc.ensure_privacy_consent(db, user.id)
     if deny:
         return error(ErrorCode.NO_PERMISSION, deny)
 
-    # 未成年人网络保护条例第四十三条：付款人须为成年人，未成年人禁充值。
-    # 放在隐私校验之后、商品查询之前：这两道都是「该不该让你下单」的前置门，
-    # 先于任何计费/库存/权益查询，避免被拦的请求白白消耗下游资源。
-    # 周岁每次现算（不存 is_adult 标记），17 岁声明的人在 18 岁生日当天自动放行。
-    gate = guard_svc.gate_payer(user)
-    if gate:
-        code, msg, data = gate
-        return error(code, msg, data)
-
     # 第五十六条第3款：支付前免责勾选的服务端闸门。留痕由前端经
     # POST /consent/sign 写入 DOC_PAYMENT_DISCLAIMER，此处校验最新一行是否为已同意。
     # 默认由 ENFORCE_PAYMENT_DISCLAIMER=False 关闭以兼容无签署 UI 的占位前端；
-    # 运营接好勾选前端后置 True，未签署者即被挡在下单前。放在年龄门槛之后、商品查询之前，
+    # 运营接好勾选前端后置 True，未签署者即被挡在下单前。放在商品查询之前，
     # 与隐私/年龄两道前置门同序（都是「该不该让你下单」的判定，先于任何计费/库存查询）。
     if settings.ENFORCE_PAYMENT_DISCLAIMER:
         if not await compliance_svc.has_signed(db, user.id, compliance_svc.DOC_PAYMENT_DISCLAIMER):
@@ -247,20 +201,19 @@ async def create_order(req: OrderCreateRequest, request: Request,
     amount = to_money(product.price)
     # 加固：真实付费档位不允许 0 价/负价成交。商品表一旦误配置成 0 元，
     # 下单→回调金额校验（0==0）会全绿放行，等于免费发放付费权益且无法退款拦截。
-    # 这里在拉起支付前 fail-closed；免费载体只应是卡券 0 元单与会员 0 元解读单。
+    # 这里在拉起支付前 fail-closed；免费载体只应是卡券 0 元单与会员 0 元报告单。
     if ptype in ("single", "membership", "report") and amount <= 0:
         return error(ErrorCode.PARAM_ERROR, "商品价格异常，请联系客服")
-    # 复用未支付订单，但必须真正校验业务快照一致。
-    # 原实现只比对 sku_code，注释却声称“仅当业务快照一致时”，实际无任何比对，导致：
-    #   ① 商品改价后复用旧 pending 单 → 本接口返回新价 amount，而支付平台按库里旧价扣款；
-    #   ② 用户换了出生信息/换了双人内容对象再购买 → 复用的旧单仍带旧 input_snapshot，
+    # 复用未支付订单时必须校验业务快照一致：
+    #   ① 商品改价后不能复用旧 pending 单，否则接口返回新价而支付平台按旧价扣款；
+    #   ② 用户换了业务输入后不能复用旧 input_snapshot，
     #      付款后生成的是上一个计算结果的报告（数据张冠李戴）。
     # 快照不一致时作废旧单并新建，保证“所见价=所扣价、所购内容=所得报告”。
     order = None
     if existing:
-        # 双渠道重复付款：快照比对加入 pay_channel——原实现复用旧 pending 单时
-        # 直接改写 pay_channel，旧渠道侧（微信 prepay/支付宝待支付单）仍挂在平台上，
-        # 用户两个渠道都能完成支付，第二笔回调撞上已完成订单即成双收款且无法自助退款。
+        # 防双渠道重复付款：快照比对加入 pay_channel。直接改写旧 pending 单的渠道
+        # 会令旧渠道侧（微信 prepay/支付宝待支付单）仍挂在平台上，用户两个渠道都能
+        # 完成支付，第二笔回调撞上已完成订单即成双收款且无法自助退款。
         # 渠道变更视为快照不一致：作废旧单、按新渠道新建。
         same_snapshot = _same_order_snapshot(
             existing, product_id=product.id, channel=channel, amount=amount,
@@ -293,9 +246,7 @@ async def create_order(req: OrderCreateRequest, request: Request,
                 db.add(order)
                 await db.flush()
         except IntegrityError:
-            # A concurrent request won the unique active-intent key. Re-read
-            # the winner as a locking read so both requests converge on one
-            # order instead of creating two payment intents.
+            # 并发请求已抢到活跃意图唯一键；读取胜出订单，避免创建第二个支付意图。
             winner = (await db.execute(
                 select(Order).where(
                     Order.user_id == user.id,
@@ -314,17 +265,6 @@ async def create_order(req: OrderCreateRequest, request: Request,
 
     # 取用户真实公网 IP
     client_ip = get_client_ip(request)
-    # 个保法第三十一条：未成年人不满 14 周岁须监护人同意；提交他人出生信息须先告知。
-    # 刻意放在订单行已建、拉起支付之前：留痕要带 order_id，而订单的 input_snapshot/biz_data
-    # 里存着本次处理的确切出生信息，两者一对就能完整重建「何时、何人、为哪个出生信息、确认了什么」。
-    # 被拦时订单停在 pending（未发起任何支付、未动钱），用户补齐确认后重试会复用同一张单。
-    bio_gate = await guard_svc.gate_bio(
-        db, user, _gate_subjects(input_snapshot, biz_data),
-        guardian_consent=req.guardian_consent, third_party_consent=req.third_party_consent,
-        ip=client_ip, user_agent=request.headers.get("user-agent"), order_id=order.id)
-    if bio_gate:
-        code, msg, data = bio_gate
-        return error(code, msg, data)
     scene = "jsapi" if (channel == "wechat" and in_wechat) else "h5"
     if scene == "jsapi" and not user.oa_openid:
         # 不把订单置 expired：order 可能是 continue-pay 复用的既有 pending 单，微信授权未完成只是临时态，
@@ -370,8 +310,7 @@ async def order_list(status: str = Query(None), page: int = Query(1, ge=1),
         report_map = {r.order_id: r for r in reps}
     list_data = []
     for item in items:
-        # 与 POST /order/refund 共用判据。原来这里是白名单式「有报告且未查看」，
-        # 与接口的黑名单式条件相反：0 元解读单给出按钮却必然退不掉（见 _self_refund_block）。
+        # 与 POST /order/refund 共用同一判据，保证按钮状态与接口结论一致。
         rep = report_map.get(item.id)
         can_refund = _self_refund_block(item, rep) is None
         list_data.append({
@@ -379,18 +318,16 @@ async def order_list(status: str = Query(None), page: int = Query(1, ge=1),
             "product_type": item.product_type, "product_name": item.product_name,
             "amount": float(item.amount), "pay_channel": item.pay_channel, "status": item.status,
             "status_text": STATUS_TEXT.get(item.status, item.status), "can_refund": can_refund,
-            # 能否查看报告由后端单点判定。前端原先只看 product_type in
-            # ('single','report')，实时测算单因此拿到了「查看报告」按钮，一点就触发补生成
-            # 并白烧付费接口（详见 fulfillment.order_delivers_report）。
+            # 能否查看报告由后端单点判定，不按 product_type 前端猜测；实时交付单
+            # 不能获得「查看报告」按钮并触发无意义的补生成操作。
             "can_view_report": item.status == "completed" and order_delivers_report(item),
-            # 报告是否仍在生成中。生成期间 can_view_report 为假，「查看报告」按钮原先直接
-            # 消失，订单页于是没有任何入口可点，用户只能反复退出重进——这是「解读期间
-            # 点报告界面没反应」的另一半原因。前端据此把入口换成「生成中，查看进度」。
+            # 报告是否仍在生成中。生成期间 can_view_report 为假，前端应显示
+            # 「生成中，查看进度」入口，避免用户误以为订单无响应。
             "report_generating": bool(rep is not None and rep.status == "generating"
                                       and item.status == "completed"
                                       and order_delivers_report(item)),
-            # 报告是否已被软删除。仅「解读历史」据此隐藏（财务凭证不受影响，
-            # 「我的订单」页仍照常显示）；无 Report 行的订单（会员/实时测算等）恒为 False。
+            # 报告是否已被软删除。仅报告历史据此隐藏（财务凭证不受影响，
+            # 「我的订单」页仍照常显示）；无 Report 行的订单（会员/实时交付等）恒为 False。
             "report_deleted": bool(rep is not None and rep.deleted_at is not None),
             "created_at": item.created_at.strftime("%Y-%m-%d %H:%M") if item.created_at else None,
         })
@@ -429,10 +366,10 @@ async def order_detail(order_id: int, db: AsyncSession = Depends(get_db),
 @router.delete("/{order_id}/report")
 async def delete_report(order_id: int, db: AsyncSession = Depends(get_db),
                         user: User = Depends(get_current_user)):
-    """删除解读报告（软删）。与档案删除同规则——只从「解读历史」隐藏，
+    """删除业务报告（软删）。只从报告历史隐藏，
     财务凭证（订单/退款）与已收藏引用均保留；收藏页的 source_alive 会置 False
     打「源已删除」标签，但报告行仍在（reportByOrder 不过滤 deleted_at）故仍可打开。
-    无 Report 行的订单（会员/实时测算等交付不走 reports 表）不提供删除。"""
+    无 Report 行的订单（会员/实时交付等不走 reports 表）不提供删除。"""
     order = (await db.execute(select(Order).where(
         Order.id == order_id, Order.user_id == user.id))).scalar_one_or_none()
     if not order:
@@ -440,7 +377,7 @@ async def delete_report(order_id: int, db: AsyncSession = Depends(get_db),
     report = (await db.execute(select(Report).where(
         Report.order_id == order_id, Report.user_id == user.id))).scalar_one_or_none()
     if not report:
-        return error(ErrorCode.PARAM_ERROR, "该记录无可删除的解读报告")
+        return error(ErrorCode.PARAM_ERROR, "该记录无可删除的报告")
     if report.deleted_at is None:
         report.deleted_at = datetime.now()
         await db.flush()
@@ -454,13 +391,13 @@ async def delete_report(order_id: int, db: AsyncSession = Depends(get_db),
 # 查单只是「更快」的补偿路径而非唯一路径：Redis 故障期间 2 分钟一轮的 sync_pending_payments
 # 仍会兜底，所以这里可以安心 fail-closed。
 async def _acquire_query_cooldown(order_id: int) -> bool:
-    """SETNX 冷却窗口：抢到返回 True（本次可以向渠道查单），未抢到或 Redis 故障返回 False。"""
+    """SETNX 冷却窗口：抢到返回 True（该次可以向渠道查单），未抢到或 Redis 故障返回 False。"""
     try:
         ok = await redis_client.set(f"lock:pay_query:{order_id}", "1", nx=True,
                                     ex=settings.PAY_STATUS_QUERY_COOLDOWN)
         return bool(ok)
     except Exception as e:
-        logger.warning(f"[支付查单] Redis 异常，本次跳过主动查单（定时任务兜底）"
+        logger.warning(f"[支付查单] Redis 异常，该次跳过主动查单（定时任务兜底）"
                        f"order_id={order_id}: {e}")
         return False
 
@@ -560,7 +497,7 @@ async def continue_pay(order_id: int, request: Request, db: AsyncSession = Depen
 async def apply_refund_api(req: RefundRequest, request: Request,
                            db: AsyncSession = Depends(get_db),
                            user: User = Depends(get_current_user)):
-    """申请退款（单次解读/双人内容：7天内且未查看）。区分成功/处理中/失败三态
+    """申请退款（单次报告：7 天内且未查看）。区分成功、处理中和失败三态。
 
     可退范围必须与 /order/list、/order/{id} 的 can_refund 同一口径。
     交付不落 reports 表的 SKU（见 fulfillment.order_delivers_report）一律走客服处理。"""
@@ -598,9 +535,8 @@ async def apply_refund_api(req: RefundRequest, request: Request,
     if not claimed:
         return error(ErrorCode.REFUND_NOT_ELIGIBLE, "该订单已在退款流程中，请勿重复申请")
 
-    # 退款单号入库即预生成并原样传给平台。此前 apply_refund 内部临时生成——进程在
-    # 拿到结果前崩溃会把空单号留在 Refund 行，retry_failed_refunds 重试时会再生成新单号
-    # 向平台发起第二笔真实退款；预生成后同一条退款单的任何重试路径复用同一 out_refund_no，
+    # 退款单号入库即预生成并原样传给平台。若调用前不落库，进程崩溃后重试会生成新单号
+    # 并可能发起第二笔真实退款；预生成后同一条退款单的任何重试路径复用同一 out_refund_no，
     # 微信/支付宝对重复单号幂等返回已有结果，杜绝“同订单二次真实退款”。
     refund_no = gen_refund_no()
     refund = Refund(order_id=order.id, user_id=user.id, reason=req.reason,
@@ -608,11 +544,9 @@ async def apply_refund_api(req: RefundRequest, request: Request,
     db.add(refund)
     await db.flush()
     # 退款单 + 订单抢占状态必须先持久化、再调渠道。
-    # 原实现「CAS 抢占 → 建退款单 → 调渠道（最长 30s）→ 状态落库」全部在
-    # 同一事务内、请求结束时才 commit：apply_refund 期间进程崩溃/重启会整体
-    # 回滚——若渠道已受理该笔退款，本地却查无记录，用户再次申请会生成新的
-    # refund_no 发起第二笔真实退款（微信/支付宝按单号幂等，不同单号=两笔钱）。
-    # 先 commit 后，任何崩溃都留下带 refund_no 的 pending_refund 退款单：
+    # 不能在调用渠道后才提交本地退款记录：apply_refund 期间进程崩溃/重启会整体
+    # 回滚，若渠道已受理退款，用户再次申请会生成新的 refund_no 并可能发起第二笔真实退款。
+    # 先提交后，任何崩溃都留下带 refund_no 的 pending_refund 退款单：
     # 判重查询据此拦截二次申请；sync_processing_refunds 主动核实其渠道结论；
     # 若渠道从未受理（404），核实任务将其置 failed 并还原订单，由
     # retry_failed_refunds 复用同一 refund_no 重发——全链路绝不换号。

@@ -1,9 +1,4 @@
-"""SMTP delivery for account verification and password reset messages.
-
-The project must not report that a verification message was sent when no
-transport is configured.  Delivery is intentionally synchronous inside
-``asyncio.to_thread`` because Python's standard-library SMTP client blocks.
-"""
+"""账号验证与密码重置邮件发送。"""
 from __future__ import annotations
 
 import asyncio
@@ -14,7 +9,7 @@ from app.config import settings
 
 
 def is_configured() -> bool:
-    """Return whether a usable SMTP relay is configured."""
+    """返回 SMTP 是否完整配置。"""
     return bool(settings.EMAIL_SMTP_HOST and
                 (settings.EMAIL_SMTP_FROM or settings.EMAIL_SMTP_USER))
 
@@ -31,7 +26,7 @@ def _send_sync(to_email: str, subject: str, body: str) -> None:
 
     host = settings.EMAIL_SMTP_HOST
     port = int(settings.EMAIL_SMTP_PORT)
-    # Port 465 is implicit TLS. Other ports use STARTTLS when enabled.
+    # 465 使用隐式 TLS，其他端口按配置使用 STARTTLS。
     client: smtplib.SMTP | smtplib.SMTP_SSL
     if port == 465:
         client = smtplib.SMTP_SSL(host, port, timeout=15)

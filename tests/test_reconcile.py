@@ -251,7 +251,7 @@ async def test_severe_diff_logs_error_others_warning(db, caplog):
 async def test_row_already_in_the_ledger_is_recognised(db):
     """先查后插：台账里已有同 key 的行（补跑/人工重对）即识别为已存在，不产生第二条。
 
-    边界说明（为什么这里只测到这一层）：`_record_diff` 里 `except IntegrityError` + SAVEPOINT
+    边界说明（原因这里只测到这一层）：`_record_diff` 里 `except IntegrityError` + SAVEPOINT
     兜的是「另一条连接在我们的 SELECT 之后提交了同 key 行」——那是定时任务与后台手动补跑
     重叠、或多 worker 并发时的跨进程时序。SQLite（本机的单事务内存库与轻量文件库）在写入前
     会先拿到锁，冲突表现为 database is locked 而不是唯一键冲突，因此这条分支只能在 MySQL 上

@@ -1,20 +1,4 @@
-"""用户端卡券接口：输码兑换 + 我的卡券
-
-接入要点：
-1) 鉴权直接复用 H5 的 app.auth.get_current_user（JWT 验签 + Redis 黑名单 + 用户存在性校验）。
-   独立版是「直接读 X-User-Id 请求头」，等于没有鉴权——任何人填 X-User-Id: 1 就能把卡
-   兑到别人账户、翻别人卡券。该模式已彻底移除。
-
-2) 本模块**不提供** /feature/check 与 /feature/consume：
-   · check 与 H5 已有的 /api/entitlement/* 功能重复；
-   · consume（核销）与 H5 的权益语义根本冲突——H5 的 check_feature 只认
-     status='available'，一旦核销，用户再看自己已生成的报告都会被拒；
-     H5 的「一次性」是靠 biz_key 绑定 + 订单复用实现的，不需要核销。
-   消耗逻辑一律沿用现有链路（插件的 ensure-report / entitlement）。
-
-3) 限流为「按用户 + 按来源 IP」双维度。独立版只按 user_id 限流，而 user_id 当时可
-   随意伪造，攻击者每换一个 header 就重置限流桶，卡密爆破实际零成本。
-"""
+"""用户端卡券兑换与查询接口。"""
 import logging
 
 from fastapi import APIRouter, Depends, Query, Request
@@ -55,13 +39,12 @@ async def card_redeem(request: Request,
         result = await card_svc.redeem(db, req.code, user.id)
         await db.commit()
     except card_svc.CardRedeemError as e:
-        # 失败同样必须留痕：渠道一批码被重复投放、卡密被翻录后按字典序撞库、
-        # 过期卡未及时下架，都只能从失败率曲线看出来。此前只有成功日志，
-        # 一次大规模撞库在系统里是完全不可见的。日志只记脱敏码，不落明文凭据。
+        # 失败同样必须留痕：渠道重复投放、卡密撞库、过期卡未下架都需要通过
+        # 失败率曲线观察。日志只记脱敏码，不落明文凭据。
         logger.warning(
             f"卡券兑换失败 user={user.id} ip={get_client_ip(request)} "
             f"code={card_svc.mask_code(req.code)} reason={e.msg}")
-        # persist=True：本次失败同时需要保留「过期卡自动作废」的状态变更，
+        # persist=True：该次失败同时需要保留「过期卡自动作废」的状态变更，
         # 必须 commit；rollback 会把作废回滚掉，过期卡继续被导出到渠道售卖。
         if e.persist:
             await db.commit()
