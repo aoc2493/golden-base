@@ -12,3 +12,6 @@ mypy==1.14.0
 
 # 依赖漏洞扫描（CI 中执行，见 .github/workflows/ci.yml）
 pip-audit==2.7.3
+
+# 第三方许可证清单生成
+pip-licenses==5.5.5

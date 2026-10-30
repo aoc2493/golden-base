@@ -154,4 +154,5 @@ sql/migrations/            # 存量库增量脚本（幂等，按编号执行）
 
 ## License
 
-[MIT](LICENSE)
+项目代码采用 [MIT](LICENSE)，第三方组件许可见
+[`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md)。
